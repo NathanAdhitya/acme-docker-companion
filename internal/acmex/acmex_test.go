@@ -168,3 +168,27 @@ func TestIssueAllCoolingDown(t *testing.T) {
 		t.Fatalf("err = %v, want ErrCoolingDown", err)
 	}
 }
+
+// TestHTTPReqProviderRequiresEndpoint: the httpreq provider (used for
+// acmeproxy.pl-style proxies) is constructed at startup, so a missing
+// HTTPREQ_ENDPOINT fails fast before any ACME order is placed.
+func TestHTTPReqProviderRequiresEndpoint(t *testing.T) {
+	t.Setenv("HTTPREQ_ENDPOINT", "")
+	t.Setenv("HTTPREQ_ENDPOINT_FILE", "")
+	if _, err := NewManager(&config.Config{DNSProvider: "httpreq"}, nil, testLogger()); err == nil {
+		t.Fatal("expected NewManager to fail without HTTPREQ_ENDPOINT")
+	}
+}
+
+// TestHTTPReqProviderBuildsWithEndpoint: a configured endpoint (and optional
+// basic-auth credentials) builds successfully; the provider is stateless and
+// shared across CA clients.
+func TestHTTPReqProviderBuildsWithEndpoint(t *testing.T) {
+	t.Setenv("HTTPREQ_ENDPOINT", "https://acmeproxy.example.com:9443")
+	t.Setenv("HTTPREQ_MODE", "")
+	t.Setenv("HTTPREQ_USERNAME", "bob")
+	t.Setenv("HTTPREQ_PASSWORD", "dobbs")
+	if _, err := NewManager(&config.Config{DNSProvider: "httpreq"}, nil, testLogger()); err != nil {
+		t.Fatalf("NewManager(httpreq): %v", err)
+	}
+}

@@ -1,9 +1,14 @@
 package acmex
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -284,6 +289,103 @@ func TestPebbleConcurrentIssuance(t *testing.T) {
 	if err != nil || !ok || len(acct.Registration) == 0 {
 		t.Fatalf("account not persisted: ok=%v err=%v", ok, err)
 	}
+}
+
+// TestPebbleHTTPReqProvider exercises acmed's construction of lego's generic
+// httpreq DNS provider against Pebble. An in-process bridge implements the same
+// contract acmeproxy.pl exposes (default mode: POST /present and /cleanup with
+// {"fqdn","value"}), writing the TXT record into pebble-challtestsrv. This
+// covers the acmeproxy.pl-style deployment path end to end.
+func TestPebbleHTTPReqProvider(t *testing.T) {
+	requireIntegration(t)
+	env := startPebble(t)
+
+	bridge := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		user, pass, ok := r.BasicAuth()
+		if !ok || user != "bob" || pass != "dobbs" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		var msg struct {
+			FQDN  string `json:"fqdn"`
+			Value string `json:"value"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&msg); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		// lego's httpreq default mode must send fqdn/value; RAW mode would send
+		// domain/token/keyAuth and would not match acmeproxy.pl.
+		if msg.FQDN == "" {
+			http.Error(w, "missing fqdn (wrong HTTPREQ_MODE?)", http.StatusBadRequest)
+			return
+		}
+
+		endpoint, body := "http://localhost:8055/set-txt", map[string]string{"host": msg.FQDN, "value": msg.Value}
+		if r.URL.Path == "/cleanup" {
+			endpoint, body = "http://localhost:8055/clear-txt", map[string]string{"host": msg.FQDN}
+		}
+		payload, _ := json.Marshal(body)
+		resp, err := http.Post(endpoint, "application/json", bytes.NewReader(payload))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode/100 != 2 {
+			http.Error(w, "challtestsrv error", http.StatusBadGateway)
+			return
+		}
+		fmt.Fprint(w, `{}`)
+	}))
+	t.Cleanup(bridge.Close)
+
+	t.Setenv("HTTPREQ_ENDPOINT", bridge.URL)
+	t.Setenv("HTTPREQ_USERNAME", "bob")
+	t.Setenv("HTTPREQ_PASSWORD", "dobbs")
+	t.Setenv("HTTPREQ_MODE", "")
+
+	cfg := pebbleConfig(t, env, map[string]config.CAConfig{
+		"pebble": {Name: "pebble", URL: env.caURL, Environment: config.EnvCustom, Email: "acmed-test@example.com"},
+	}, []string{"pebble"})
+	cfg.DNSProvider = "httpreq"
+
+	st, err := store.Open(cfg.StateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	mgr, err := NewManager(cfg, st, testLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	issued, err := mgr.Issue(context.Background(), IssueRequest{
+		Domains:    []string{"httpreq-test.example.com"},
+		KeyType:    certcrypto.EC256,
+		Candidates: []string{"pebble"},
+	})
+	if err != nil {
+		t.Fatalf("issue via httpreq: %v", err)
+	}
+	certs, err := certcrypto.ParsePEMBundle(issued.FullchainPEM)
+	if err != nil || len(certs) == 0 {
+		t.Fatalf("parse issued bundle: %v", err)
+	}
+	if !containsString(certs[0].DNSNames, "httpreq-test.example.com") {
+		t.Fatalf("issued certificate lacks the requested SAN: %v", certs[0].DNSNames)
+	}
+}
+
+func containsString(haystack []string, needle string) bool {
+	for _, s := range haystack {
+		if s == needle {
+			return true
+		}
+	}
+	return false
 }
 
 func waitForPebble(t *testing.T) {
