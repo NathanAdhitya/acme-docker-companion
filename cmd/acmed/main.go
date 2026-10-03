@@ -75,7 +75,7 @@ func cmdRun(args []string) int {
 	}
 	defer st.Close()
 
-	docker, err := dockerx.New()
+	docker, err := dockerx.New(cfg.DockerHost)
 	if err != nil {
 		log.Error("cannot connect to Docker", "error", err)
 		return 1
@@ -133,7 +133,7 @@ func cmdCheck(args []string) int {
 		fmt.Println("warning:", w)
 	}
 
-	docker, derr := dockerx.New()
+	docker, derr := dockerx.New(cfg.DockerHost)
 	if derr != nil {
 		fmt.Println("warning: cannot connect to Docker, skipping label validation:", derr)
 		return 0

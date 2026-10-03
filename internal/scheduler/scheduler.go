@@ -8,9 +8,6 @@ import "time"
 
 // Config holds scheduling policy.
 type Config struct {
-	// CheckInterval is how often ARI is consulted and due checks run. It also
-	// bounds how far ahead an ARI renewal may be scheduled.
-	CheckInterval time.Duration
 	// RenewBefore, when non-zero, overrides the lifetime-relative threshold.
 	RenewBefore time.Duration
 	// Backoff is the retry schedule indexed by consecutive failure count.

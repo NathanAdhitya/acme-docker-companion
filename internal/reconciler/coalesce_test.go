@@ -3,42 +3,23 @@ package reconciler
 import (
 	"context"
 	"testing"
-
-	"github.com/NathanAdhitya/acme-docker-companion/internal/dockerx"
-	"github.com/NathanAdhitya/acme-docker-companion/internal/store"
 )
 
 // TestReloadCoalescedAcrossCertificates: two certificates in one container that
 // share a reload action (inherited from the container default) reload once.
 func TestReloadCoalescedAcrossCertificates(t *testing.T) {
-	hostSource := t.TempDir()
-	managerRoot := t.TempDir()
-	caURL := "https://acme-staging-v02.api.letsencrypt.org/directory"
+	cfg := testConfig(t, testCAURL)
+	st := openTestStore(t, cfg)
 
-	cfg := testConfig(t, caURL)
-	st, err := store.Open(cfg.StateDir)
-	if err != nil {
-		t.Fatal(err)
+	labels := map[string]string{
+		"acmed.reload.cmd":  "nginx -s reload",
+		"acmed.domains":     "example.com",
+		"acmed.path":        "/etc/nginx/certs/example.com",
+		"acmed.api.domains": "api.example.com",
+		"acmed.api.path":    "/etc/nginx/certs/api.example.com",
 	}
-	defer st.Close()
-
-	container := dockerx.Container{
-		ID: "c1", Name: "web",
-		Labels: map[string]string{
-			"acmed.reload.cmd":  "nginx -s reload",
-			"acmed.domains":     "example.com",
-			"acmed.path":        "/etc/nginx/certs/example.com",
-			"acmed.api.domains": "api.example.com",
-			"acmed.api.path":    "/etc/nginx/certs/api.example.com",
-		},
-		Mounts: []dockerx.Mount{{Destination: "/etc/nginx/certs", Source: hostSource}},
-	}
-	docker := &fakeDocker{
-		containers: []dockerx.Container{container},
-		self:       dockerx.Container{ID: "self", Mounts: []dockerx.Mount{{Destination: managerRoot, Source: hostSource}}},
-		selfOK:     true,
-	}
-	issuer := &fakeIssuer{issued: makeIssued(t, []string{"example.com"}, caURL)}
+	_, _, docker := testDocker(t, labels)
+	issuer := &fakeIssuer{issued: makeIssued(t, []string{"example.com"}, testCAURL)}
 
 	rec := New(cfg, docker, issuer, st, testLogger())
 	rec.Once(context.Background())
@@ -60,35 +41,19 @@ func TestReloadCoalescedAcrossCertificates(t *testing.T) {
 // TestReloadDistinctActionsNotCoalesced: different per-certificate reload
 // commands each run.
 func TestReloadDistinctActionsNotCoalesced(t *testing.T) {
-	hostSource := t.TempDir()
-	managerRoot := t.TempDir()
-	caURL := "https://acme-staging-v02.api.letsencrypt.org/directory"
+	cfg := testConfig(t, testCAURL)
+	st := openTestStore(t, cfg)
 
-	cfg := testConfig(t, caURL)
-	st, err := store.Open(cfg.StateDir)
-	if err != nil {
-		t.Fatal(err)
+	labels := map[string]string{
+		"acmed.reload.cmd":     "nginx -s reload",
+		"acmed.domains":        "example.com",
+		"acmed.path":           "/etc/nginx/certs/example.com",
+		"acmed.api.domains":    "api.example.com",
+		"acmed.api.path":       "/etc/nginx/certs/api.example.com",
+		"acmed.api.reload.cmd": "service nginx reload",
 	}
-	defer st.Close()
-
-	container := dockerx.Container{
-		ID: "c1", Name: "web",
-		Labels: map[string]string{
-			"acmed.reload.cmd":     "nginx -s reload",
-			"acmed.domains":        "example.com",
-			"acmed.path":           "/etc/nginx/certs/example.com",
-			"acmed.api.domains":    "api.example.com",
-			"acmed.api.path":       "/etc/nginx/certs/api.example.com",
-			"acmed.api.reload.cmd": "service nginx reload",
-		},
-		Mounts: []dockerx.Mount{{Destination: "/etc/nginx/certs", Source: hostSource}},
-	}
-	docker := &fakeDocker{
-		containers: []dockerx.Container{container},
-		self:       dockerx.Container{ID: "self", Mounts: []dockerx.Mount{{Destination: managerRoot, Source: hostSource}}},
-		selfOK:     true,
-	}
-	issuer := &fakeIssuer{issued: makeIssued(t, []string{"example.com"}, caURL)}
+	_, _, docker := testDocker(t, labels)
+	issuer := &fakeIssuer{issued: makeIssued(t, []string{"example.com"}, testCAURL)}
 
 	rec := New(cfg, docker, issuer, st, testLogger())
 	rec.Once(context.Background())
@@ -100,34 +65,18 @@ func TestReloadDistinctActionsNotCoalesced(t *testing.T) {
 
 // TestReloadCoalescedSignal covers the signal path.
 func TestReloadCoalescedSignal(t *testing.T) {
-	hostSource := t.TempDir()
-	managerRoot := t.TempDir()
-	caURL := "https://acme-staging-v02.api.letsencrypt.org/directory"
+	cfg := testConfig(t, testCAURL)
+	st := openTestStore(t, cfg)
 
-	cfg := testConfig(t, caURL)
-	st, err := store.Open(cfg.StateDir)
-	if err != nil {
-		t.Fatal(err)
+	labels := map[string]string{
+		"acmed.reload.signal": "SIGHUP",
+		"acmed.domains":       "example.com",
+		"acmed.path":          "/etc/nginx/certs/example.com",
+		"acmed.api.domains":   "api.example.com",
+		"acmed.api.path":      "/etc/nginx/certs/api.example.com",
 	}
-	defer st.Close()
-
-	container := dockerx.Container{
-		ID: "c1", Name: "web",
-		Labels: map[string]string{
-			"acmed.reload.signal": "SIGHUP",
-			"acmed.domains":       "example.com",
-			"acmed.path":          "/etc/nginx/certs/example.com",
-			"acmed.api.domains":   "api.example.com",
-			"acmed.api.path":      "/etc/nginx/certs/api.example.com",
-		},
-		Mounts: []dockerx.Mount{{Destination: "/etc/nginx/certs", Source: hostSource}},
-	}
-	docker := &fakeDocker{
-		containers: []dockerx.Container{container},
-		self:       dockerx.Container{ID: "self", Mounts: []dockerx.Mount{{Destination: managerRoot, Source: hostSource}}},
-		selfOK:     true,
-	}
-	issuer := &fakeIssuer{issued: makeIssued(t, []string{"example.com"}, caURL)}
+	_, _, docker := testDocker(t, labels)
+	issuer := &fakeIssuer{issued: makeIssued(t, []string{"example.com"}, testCAURL)}
 
 	rec := New(cfg, docker, issuer, st, testLogger())
 	rec.Once(context.Background())

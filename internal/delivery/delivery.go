@@ -10,6 +10,7 @@ import (
 
 	"github.com/NathanAdhitya/acme-docker-companion/internal/dockerx"
 	"github.com/NathanAdhitya/acme-docker-companion/internal/fsutil"
+	"github.com/NathanAdhitya/acme-docker-companion/internal/store"
 )
 
 // Files are the four PEM files written for every certificate.
@@ -112,8 +113,8 @@ func relWithin(base, p string) string {
 // WriteCert writes the certificate files into dir, skipping any file whose
 // content is unchanged. changed is true when at least one file was rewritten.
 //
-// The file names are the certificate format's, fixed by DESIGN Appendix B;
-// they must stay in sync with the constants in internal/store.
+// The file names come from the store package, so the cached copy and the
+// delivered copy cannot drift (DESIGN Appendix B).
 func WriteCert(dir string, files Files, opts Options) (changed bool, err error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return false, fmt.Errorf("create certificate dir %s: %w", dir, err)
@@ -123,10 +124,10 @@ func WriteCert(dir string, files Files, opts Options) (changed bool, err error) 
 		data []byte
 		mode os.FileMode
 	}{
-		{"fullchain.pem", files.Fullchain, opts.CertMode},
-		{"cert.pem", files.Cert, opts.CertMode},
-		{"chain.pem", files.Chain, opts.CertMode},
-		{"privkey.pem", files.Privkey, opts.KeyMode},
+		{store.FileFullchain, files.Fullchain, opts.CertMode},
+		{store.FileCert, files.Cert, opts.CertMode},
+		{store.FileChain, files.Chain, opts.CertMode},
+		{store.FilePrivkey, files.Privkey, opts.KeyMode},
 	}
 	for _, e := range entries {
 		p := path.Join(dir, e.name)

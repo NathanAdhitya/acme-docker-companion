@@ -120,8 +120,10 @@ bash test/e2e.sh                    # full container stack: Pebble + acmed + ngi
 - Docker SDK results are structs: `ContainerListResult.Items`,
   `ContainerInspectResult.Container` (`.Mounts`, `.Config.Labels`),
   `EventsResult{Messages, Err}`, `ExecCreateOptions{Cmd, AttachStdout, AttachStderr}`,
-  `ContainerKillOptions{Signal}`. `client.New(client.FromEnv)` negotiates the API
-  version automatically.
+  `ContainerKillOptions{Signal}`. API-version negotiation is on by default, so
+  `client.New(client.FromEnv)` is enough (`WithAPIVersionNegotiation()` is a
+  deprecated no-op); acmed adds `client.WithHost(host)` to honour the resolved
+  `DOCKER_HOST`.
 - Docker's embedded DNS is `127.0.0.11`; set `ACME_DNS_RESOLVERS` explicitly when
   propagation checks misbehave.
 

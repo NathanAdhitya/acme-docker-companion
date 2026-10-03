@@ -161,36 +161,50 @@ func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
-// --- tests ---
+// testCAURL is a staging endpoint used only as a fake issuer identity in tests.
+const testCAURL = "https://acme-staging-v02.api.letsencrypt.org/directory"
 
-func TestIssueDeliverAndReload(t *testing.T) {
-	hostSource := t.TempDir()
-	managerRoot := t.TempDir()
-	caURL := "https://acme-staging-v02.api.letsencrypt.org/directory"
-
-	cfg := testConfig(t, caURL)
+// openTestStore opens the state directory and closes it at test cleanup.
+func openTestStore(t *testing.T, cfg *config.Config) *store.Store {
+	t.Helper()
 	st, err := store.Open(cfg.StateDir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer st.Close()
+	t.Cleanup(func() { _ = st.Close() })
+	return st
+}
 
-	container := dockerx.Container{
-		ID:   "c1",
-		Name: "web",
-		Labels: map[string]string{
-			"acmed.domains":    "example.com",
-			"acmed.path":       "/etc/nginx/certs/example.com",
-			"acmed.reload.cmd": "nginx -s reload",
-		},
-		Mounts: []dockerx.Mount{{Destination: "/etc/nginx/certs", Source: hostSource}},
+// testDocker returns a fake Docker client with one container mounting a fresh
+// host directory at /etc/nginx/certs and the manager mounting the same host
+// directory at a separate root. Both directories are returned.
+func testDocker(t *testing.T, labels map[string]string) (hostSource, managerRoot string, d *fakeDocker) {
+	t.Helper()
+	hostSource, managerRoot = t.TempDir(), t.TempDir()
+	d = &fakeDocker{
+		containers: []dockerx.Container{{
+			ID: "c1", Name: "web", Labels: labels,
+			Mounts: []dockerx.Mount{{Destination: "/etc/nginx/certs", Source: hostSource}},
+		}},
+		self:   dockerx.Container{ID: "self", Mounts: []dockerx.Mount{{Destination: managerRoot, Source: hostSource}}},
+		selfOK: true,
 	}
-	docker := &fakeDocker{
-		containers: []dockerx.Container{container},
-		self:       dockerx.Container{ID: "self", Name: "acmed", Mounts: []dockerx.Mount{{Destination: managerRoot, Source: hostSource}}},
-		selfOK:     true,
+	return hostSource, managerRoot, d
+}
+
+// --- tests ---
+
+func TestIssueDeliverAndReload(t *testing.T) {
+	cfg := testConfig(t, testCAURL)
+	st := openTestStore(t, cfg)
+
+	labels := map[string]string{
+		"acmed.domains":    "example.com",
+		"acmed.path":       "/etc/nginx/certs/example.com",
+		"acmed.reload.cmd": "nginx -s reload",
 	}
-	issuer := &fakeIssuer{issued: makeIssued(t, []string{"example.com"}, caURL)}
+	_, managerRoot, docker := testDocker(t, labels)
+	issuer := &fakeIssuer{issued: makeIssued(t, []string{"example.com"}, testCAURL)}
 
 	rec := New(cfg, docker, issuer, st, testLogger())
 	rec.Once(context.Background())
@@ -232,17 +246,11 @@ func TestIssueDeliverAndReload(t *testing.T) {
 // different CA endpoint keeps serving until it is due, and candidate changes
 // never force reissuance (the cache protects ACME rate limits).
 func TestCachedCertReusedAcrossCandidateChange(t *testing.T) {
-	hostSource := t.TempDir()
-	managerRoot := t.TempDir()
-	stagingURL := "https://acme-staging-v02.api.letsencrypt.org/directory"
+	stagingURL := testCAURL
 	prodURL := "https://acme-v02.api.letsencrypt.org/directory"
 
 	cfg := testConfig(t, prodURL) // candidates now point at production
-	st, err := store.Open(cfg.StateDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer st.Close()
+	st := openTestStore(t, cfg)
 
 	// Seed the cache with a certificate issued by the staging CA.
 	old := makeIssued(t, []string{"example.com"}, stagingURL)
@@ -255,16 +263,8 @@ func TestCachedCertReusedAcrossCandidateChange(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	container := dockerx.Container{
-		ID: "c1", Name: "web",
-		Labels: map[string]string{"acmed.domains": "example.com", "acmed.path": "/etc/nginx/certs/example.com"},
-		Mounts: []dockerx.Mount{{Destination: "/etc/nginx/certs", Source: hostSource}},
-	}
-	docker := &fakeDocker{
-		containers: []dockerx.Container{container},
-		self:       dockerx.Container{ID: "self", Mounts: []dockerx.Mount{{Destination: managerRoot, Source: hostSource}}},
-		selfOK:     true,
-	}
+	labels := map[string]string{"acmed.domains": "example.com", "acmed.path": "/etc/nginx/certs/example.com"}
+	_, managerRoot, docker := testDocker(t, labels)
 	issuer := &fakeIssuer{issued: makeIssued(t, []string{"example.com"}, prodURL)}
 
 	rec := New(cfg, docker, issuer, st, testLogger())
@@ -294,32 +294,17 @@ func TestCachedCertReusedAcrossCandidateChange(t *testing.T) {
 }
 
 func TestReloadFailureIsRetried(t *testing.T) {
-	hostSource := t.TempDir()
-	managerRoot := t.TempDir()
-	caURL := "https://acme-staging-v02.api.letsencrypt.org/directory"
+	cfg := testConfig(t, testCAURL)
+	st := openTestStore(t, cfg)
 
-	cfg := testConfig(t, caURL)
-	st, err := store.Open(cfg.StateDir)
-	if err != nil {
-		t.Fatal(err)
+	labels := map[string]string{
+		"acmed.domains":    "example.com",
+		"acmed.path":       "/etc/nginx/certs/example.com",
+		"acmed.reload.cmd": "nginx -s reload",
 	}
-	defer st.Close()
-
-	container := dockerx.Container{
-		ID: "c1", Name: "web",
-		Labels: map[string]string{
-			"acmed.domains": "example.com", "acmed.path": "/etc/nginx/certs/example.com",
-			"acmed.reload.cmd": "nginx -s reload",
-		},
-		Mounts: []dockerx.Mount{{Destination: "/etc/nginx/certs", Source: hostSource}},
-	}
-	docker := &fakeDocker{
-		containers: []dockerx.Container{container},
-		self:       dockerx.Container{ID: "self", Mounts: []dockerx.Mount{{Destination: managerRoot, Source: hostSource}}},
-		selfOK:     true,
-		execErr:    errFake("reload failed"),
-	}
-	issuer := &fakeIssuer{issued: makeIssued(t, []string{"example.com"}, caURL)}
+	_, _, docker := testDocker(t, labels)
+	docker.execErr = errFake("reload failed")
+	issuer := &fakeIssuer{issued: makeIssued(t, []string{"example.com"}, testCAURL)}
 
 	rec := New(cfg, docker, issuer, st, testLogger())
 	rec.Once(context.Background())
@@ -339,13 +324,8 @@ func TestReloadFailureIsRetried(t *testing.T) {
 }
 
 func TestMisconfiguredTargetDegradesNotCrashes(t *testing.T) {
-	caURL := "https://acme-staging-v02.api.letsencrypt.org/directory"
-	cfg := testConfig(t, caURL)
-	st, err := store.Open(cfg.StateDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer st.Close()
+	cfg := testConfig(t, testCAURL)
+	st := openTestStore(t, cfg)
 
 	// The target mounts nothing covering the path.
 	container := dockerx.Container{
@@ -358,7 +338,7 @@ func TestMisconfiguredTargetDegradesNotCrashes(t *testing.T) {
 		self:       dockerx.Container{ID: "self", Mounts: nil},
 		selfOK:     true,
 	}
-	issuer := &fakeIssuer{issued: makeIssued(t, []string{"example.com"}, caURL)}
+	issuer := &fakeIssuer{issued: makeIssued(t, []string{"example.com"}, testCAURL)}
 
 	rec := New(cfg, docker, issuer, st, testLogger())
 	rec.Once(context.Background())
@@ -373,30 +353,16 @@ func TestMisconfiguredTargetDegradesNotCrashes(t *testing.T) {
 }
 
 func TestSignalReload(t *testing.T) {
-	hostSource := t.TempDir()
-	managerRoot := t.TempDir()
-	caURL := "https://acme-staging-v02.api.letsencrypt.org/directory"
-	cfg := testConfig(t, caURL)
-	st, err := store.Open(cfg.StateDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer st.Close()
+	cfg := testConfig(t, testCAURL)
+	st := openTestStore(t, cfg)
 
-	container := dockerx.Container{
-		ID: "c1", Name: "web",
-		Labels: map[string]string{
-			"acmed.domains": "example.com", "acmed.path": "/etc/nginx/certs/example.com",
-			"acmed.reload.signal": "SIGHUP",
-		},
-		Mounts: []dockerx.Mount{{Destination: "/etc/nginx/certs", Source: hostSource}},
+	labels := map[string]string{
+		"acmed.domains":       "example.com",
+		"acmed.path":          "/etc/nginx/certs/example.com",
+		"acmed.reload.signal": "SIGHUP",
 	}
-	docker := &fakeDocker{
-		containers: []dockerx.Container{container},
-		self:       dockerx.Container{ID: "self", Mounts: []dockerx.Mount{{Destination: managerRoot, Source: hostSource}}},
-		selfOK:     true,
-	}
-	issuer := &fakeIssuer{issued: makeIssued(t, []string{"example.com"}, caURL)}
+	_, _, docker := testDocker(t, labels)
+	issuer := &fakeIssuer{issued: makeIssued(t, []string{"example.com"}, testCAURL)}
 
 	rec := New(cfg, docker, issuer, st, testLogger())
 	rec.Once(context.Background())
@@ -411,27 +377,11 @@ func TestSignalReload(t *testing.T) {
 // TestIssuanceBackoffHonored: a failed issuance must not be retried on every
 // due tick; the persisted backoff gates it (DESIGN §9).
 func TestIssuanceBackoffHonored(t *testing.T) {
-	hostSource := t.TempDir()
-	managerRoot := t.TempDir()
-	caURL := "https://acme-staging-v02.api.letsencrypt.org/directory"
+	cfg := testConfig(t, testCAURL)
+	st := openTestStore(t, cfg)
 
-	cfg := testConfig(t, caURL)
-	st, err := store.Open(cfg.StateDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer st.Close()
-
-	container := dockerx.Container{
-		ID: "c1", Name: "web",
-		Labels: map[string]string{"acmed.domains": "example.com", "acmed.path": "/etc/nginx/certs/example.com"},
-		Mounts: []dockerx.Mount{{Destination: "/etc/nginx/certs", Source: hostSource}},
-	}
-	docker := &fakeDocker{
-		containers: []dockerx.Container{container},
-		self:       dockerx.Container{ID: "self", Mounts: []dockerx.Mount{{Destination: managerRoot, Source: hostSource}}},
-		selfOK:     true,
-	}
+	labels := map[string]string{"acmed.domains": "example.com", "acmed.path": "/etc/nginx/certs/example.com"}
+	_, _, docker := testDocker(t, labels)
 	issuer := &fakeIssuer{err: errFake("ca down")}
 
 	clock := time.Now().UTC()
@@ -482,31 +432,15 @@ func (b *blockingIssuer) RenewalInfo(context.Context, string, *x509.Certificate)
 // published snapshot, so it stays responsive while a certificate is issuing
 // (DESIGN §15 D5).
 func TestSnapshotDoesNotBlockOnIssuance(t *testing.T) {
-	hostSource := t.TempDir()
-	managerRoot := t.TempDir()
-	caURL := "https://acme-staging-v02.api.letsencrypt.org/directory"
+	cfg := testConfig(t, testCAURL)
+	st := openTestStore(t, cfg)
 
-	cfg := testConfig(t, caURL)
-	st, err := store.Open(cfg.StateDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer st.Close()
-
-	container := dockerx.Container{
-		ID: "c1", Name: "web",
-		Labels: map[string]string{"acmed.domains": "example.com", "acmed.path": "/etc/nginx/certs/example.com"},
-		Mounts: []dockerx.Mount{{Destination: "/etc/nginx/certs", Source: hostSource}},
-	}
-	docker := &fakeDocker{
-		containers: []dockerx.Container{container},
-		self:       dockerx.Container{ID: "self", Mounts: []dockerx.Mount{{Destination: managerRoot, Source: hostSource}}},
-		selfOK:     true,
-	}
+	labels := map[string]string{"acmed.domains": "example.com", "acmed.path": "/etc/nginx/certs/example.com"}
+	_, _, docker := testDocker(t, labels)
 	issuer := &blockingIssuer{
 		started: make(chan struct{}),
 		release: make(chan struct{}),
-		issued:  makeIssued(t, []string{"example.com"}, caURL),
+		issued:  makeIssued(t, []string{"example.com"}, testCAURL),
 	}
 
 	rec := New(cfg, docker, issuer, st, testLogger())
@@ -534,12 +468,8 @@ func TestSnapshotDoesNotBlockOnIssuance(t *testing.T) {
 // TestGCRemovesExpiredUnreferenced: expired certificates no running container
 // references are removed; unexpired or referenced ones are kept.
 func TestGCRemovesExpiredUnreferenced(t *testing.T) {
-	cfg := testConfig(t, "https://acme-staging-v02.api.letsencrypt.org/directory")
-	st, err := store.Open(cfg.StateDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer st.Close()
+	cfg := testConfig(t, testCAURL)
+	st := openTestStore(t, cfg)
 
 	now := time.Now().UTC()
 	expiredID := store.CertID([]string{"old.example.com"}, certcrypto.EC256, "")
@@ -592,27 +522,11 @@ func TestARIRefreshHonorsRetryAfter(t *testing.T) {
 // TestCoolingDownDoesNotGrowBackoff: a candidate-wide cooldown is not a
 // certificate failure, so it must not grow the retry backoff (DESIGN §8 D2/D4).
 func TestCoolingDownDoesNotGrowBackoff(t *testing.T) {
-	hostSource := t.TempDir()
-	managerRoot := t.TempDir()
-	caURL := "https://acme-staging-v02.api.letsencrypt.org/directory"
+	cfg := testConfig(t, testCAURL)
+	st := openTestStore(t, cfg)
 
-	cfg := testConfig(t, caURL)
-	st, err := store.Open(cfg.StateDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer st.Close()
-
-	container := dockerx.Container{
-		ID: "c1", Name: "web",
-		Labels: map[string]string{"acmed.domains": "example.com", "acmed.path": "/etc/nginx/certs/example.com"},
-		Mounts: []dockerx.Mount{{Destination: "/etc/nginx/certs", Source: hostSource}},
-	}
-	docker := &fakeDocker{
-		containers: []dockerx.Container{container},
-		self:       dockerx.Container{ID: "self", Mounts: []dockerx.Mount{{Destination: managerRoot, Source: hostSource}}},
-		selfOK:     true,
-	}
+	labels := map[string]string{"acmed.domains": "example.com", "acmed.path": "/etc/nginx/certs/example.com"}
+	_, _, docker := testDocker(t, labels)
 	issuer := &fakeIssuer{err: fmt.Errorf("deferred: %w", acmex.ErrCoolingDown)}
 
 	rec := New(cfg, docker, issuer, st, testLogger())

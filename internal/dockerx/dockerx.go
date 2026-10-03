@@ -48,11 +48,15 @@ type dockerClient struct {
 	cli *client.Client
 }
 
-// New connects to the Docker daemon using the standard environment
-// (DOCKER_HOST, DOCKER_TLS_VERIFY, DOCKER_CERT_PATH) with API version
-// negotiation enabled.
-func New() (Client, error) {
-	cli, err := client.New(client.FromEnv, client.WithAPIVersionNegotiation())
+// New connects to the Docker daemon at host, using the standard environment
+// (DOCKER_TLS_VERIFY, DOCKER_CERT_PATH) for TLS. API-version negotiation is on
+// by default. An empty host falls back to the SDK's own DOCKER_HOST handling.
+func New(host string) (Client, error) {
+	opts := []client.Opt{client.FromEnv}
+	if host != "" {
+		opts = append(opts, client.WithHost(host))
+	}
+	cli, err := client.New(opts...)
 	if err != nil {
 		return nil, fmt.Errorf("docker client: %w", err)
 	}

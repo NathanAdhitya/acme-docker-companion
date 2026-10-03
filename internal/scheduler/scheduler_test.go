@@ -7,8 +7,7 @@ import (
 
 func cfg() Config {
 	return Config{
-		CheckInterval: 12 * time.Hour,
-		Backoff:       []time.Duration{time.Minute, 10 * time.Minute, 100 * time.Minute, 24 * time.Hour},
+		Backoff: []time.Duration{time.Minute, 10 * time.Minute, 100 * time.Minute, 24 * time.Hour},
 	}
 }
 

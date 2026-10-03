@@ -48,8 +48,6 @@ type Meta struct {
 	LastError           string    `json:"lastError,omitempty"`
 
 	ARIValid      bool          `json:"ariValid,omitempty"`
-	ARIStart      time.Time     `json:"ariStart,omitempty"`
-	ARIEnd        time.Time     `json:"ariEnd,omitempty"`
 	ARIRetryAfter time.Duration `json:"ariRetryAfter,omitempty"`
 	ARIRenewAt    time.Time     `json:"ariRenewAt,omitempty"`
 	ARICheckedAt  time.Time     `json:"ariCheckedAt,omitempty"`
@@ -90,7 +88,7 @@ func Open(dir string) (*Store, error) {
 	}
 
 	// Remove leftovers from a crash mid-write.
-	_ = fsutil.CleanTemp(filepath.Join(dir, "certs"))
+	_ = fsutil.CleanTemp(dir)
 
 	return &Store{dir: dir, lock: f}, nil
 }

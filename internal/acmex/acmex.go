@@ -48,9 +48,6 @@ type IssueRequest struct {
 
 // PrevCert is the previously issued material for a certificate.
 type PrevCert struct {
-	Domains   []string
-	KeyType   certcrypto.KeyType
-	Profile   string
 	IssuerCA  string
 	IssuerURL string
 	CertPEM   []byte
@@ -74,27 +71,10 @@ type Issued struct {
 // order was attempted. Callers must not count it as a certificate failure.
 var ErrCoolingDown = errors.New("all candidate CAs are cooling down")
 
-// ARIWindow is an ACME Renewal Information suggested window.
-type ARIWindow struct {
-	Start      time.Time
-	End        time.Time
-	RetryAfter time.Duration
-}
-
-// ShouldRenewAt returns the time a renewal should be attempted, or nil when
-// the caller should defer until its next normal wake-up. The RFC 9773 window
-// algorithm is lego's; this only translates our persisted form.
-func (w ARIWindow) ShouldRenewAt(now time.Time, willingToSleep time.Duration) *time.Time {
-	ri := &certificate.RenewalInfo{
-		ExtendedRenewalInfo: &acme.ExtendedRenewalInfo{
-			RenewalInfo: acme.RenewalInfo{
-				SuggestedWindow: acme.Window{Start: w.Start, End: w.End},
-			},
-			RetryAfter: w.RetryAfter,
-		},
-	}
-	return ri.ShouldRenewAt(now, willingToSleep)
-}
+// ARIWindow is an ACME Renewal Information suggested window. It is an alias
+// for lego's type, so the RFC 9773 ShouldRenewAt algorithm stays lego's and
+// the manager never re-wraps it.
+type ARIWindow = certificate.RenewalInfo
 
 // Issuer is the certificate issuance interface used by the reconciler.
 type Issuer interface {
@@ -245,11 +225,7 @@ func (m *Manager) RenewalInfo(ctx context.Context, caName string, leaf *x509.Cer
 	if err != nil {
 		return nil, fmt.Errorf("ARI at %s: %w", caName, err)
 	}
-	return &ARIWindow{
-		Start:      ri.SuggestedWindow.Start,
-		End:        ri.SuggestedWindow.End,
-		RetryAfter: ri.RetryAfter,
-	}, nil
+	return ri, nil
 }
 
 func (m *Manager) issueWith(ctx context.Context, cli *caClient, req IssueRequest) (*certificate.Resource, error) {
@@ -259,8 +235,8 @@ func (m *Manager) issueWith(ctx context.Context, cli *caClient, req IssueRequest
 	// in staging and production.
 	if canRenew(req.Prev, cli.name, cli.url) {
 		resource := certificate.Resource{
-			Domains:     req.Prev.Domains,
-			KeyType:     req.Prev.KeyType,
+			Domains:     req.Domains,
+			KeyType:     req.KeyType,
 			PrivateKey:  req.Prev.KeyPEM,
 			Certificate: req.Prev.CertPEM,
 		}

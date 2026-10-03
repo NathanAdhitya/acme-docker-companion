@@ -85,7 +85,7 @@ Packages:
 | `internal/reconciler` | demand set, dedupe, single-flight, delivery orchestration |
 | `internal/scheduler` | pure lifetime/backoff decision logic (clock injected); ARI windows delegated to lego |
 | `internal/delivery` | mount-path resolution, atomic file writes |
-| `internal/reload` | exec command / signal, timeout + retries |
+| `internal/reload` | exec command / signal with a timeout |
 | `internal/httpx` | `/healthz` JSON status |
 | `cmd/acmed` | `run` (default), `check`, `healthcheck`, `--once`, `--dry-run` |
 
@@ -378,9 +378,9 @@ not churn; leftover temp files are removed at startup.
 - Neither configured → files are still written, a warning is logged, and the
   target reports `reload: none`.
 - Reload runs only when file content actually changed.
-- Failed reloads are retried with backoff and reported as `reload: failed` /
-  `pending`; healthcheck stays green (liveness only) so orchestrators do not
-  restart the manager over ACME or reload problems.
+- Failed reloads are retried on a later reconcile cycle and reported as
+  `reload: failed` / `pending`; healthcheck stays green (liveness only) so
+  orchestrators do not restart the manager over ACME or reload problems.
 
 ### Multi-certificate containers
 

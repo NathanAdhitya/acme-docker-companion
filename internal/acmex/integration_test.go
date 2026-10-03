@@ -182,8 +182,6 @@ func TestPebbleIssueAndRenew(t *testing.T) {
 		KeyType:    certcrypto.EC256,
 		Candidates: []string{"pebble"},
 		Prev: &PrevCert{
-			Domains:   domains,
-			KeyType:   certcrypto.EC256,
 			IssuerCA:  "pebble",
 			IssuerURL: env.caURL,
 			CertPEM:   issued.FullchainPEM,

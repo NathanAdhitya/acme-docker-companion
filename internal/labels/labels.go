@@ -36,20 +36,20 @@ type Request struct {
 	CAs []string
 	// KeyType is an optional per-certificate key type.
 	KeyType certcrypto.KeyType
-	// Enabled is false when acmed.enable=false.
-	Enabled bool
 }
 
 // certNameRe restricts certificate name segments.
 var certNameRe = regexp.MustCompile(`^[a-z0-9_-]+$`)
 
 var simpleFields = map[string]bool{
-	"domains":      true,
-	"path":         true,
-	"ca":           true,
-	"key-type":     true,
-	"manager-path": true,
-	"enable":       true,
+	"domains":       true,
+	"path":          true,
+	"ca":            true,
+	"key-type":      true,
+	"manager-path":  true,
+	"enable":        true,
+	"reload.cmd":    true,
+	"reload.signal": true,
 }
 
 // allowedSignals is the set of signal names accepted for reload.signal.
@@ -153,14 +153,14 @@ func Parse(prefix string, lbls map[string]string, defaultKeyType certcrypto.KeyT
 
 	seenPaths := map[string]string{} // path -> cert name
 	for _, c := range candidates {
-		req, errs := buildRequest(c.name, c.rc, def)
+		req, enabled, errs := buildRequest(c.name, c.rc, def)
 		if len(errs) > 0 {
 			for _, e := range errs {
 				warnings = append(warnings, fmt.Sprintf("certificate %q: %s", DisplayName(c.name), e))
 			}
 			continue
 		}
-		if !req.Enabled {
+		if !enabled {
 			continue
 		}
 		if prev, dup := seenPaths[req.Path]; dup {
@@ -185,20 +185,14 @@ func DisplayName(name string) string {
 // splitKey splits the part after the prefix into a certificate name and a
 // field name. The default certificate uses the empty name.
 func splitKey(rest string) (name, field string, ok bool) {
-	if rest == "reload.cmd" || rest == "reload.signal" {
-		return "", rest, true
-	}
 	if simpleFields[rest] {
 		return "", rest, true
 	}
 	candidate, f, found := strings.Cut(rest, ".")
-	if !found || !certNameRe.MatchString(candidate) {
+	if !found || !certNameRe.MatchString(candidate) || !simpleFields[f] {
 		return "", "", false
 	}
-	if f == "reload.cmd" || f == "reload.signal" || simpleFields[f] {
-		return candidate, f, true
-	}
-	return "", "", false
+	return candidate, f, true
 }
 
 // parseDefaults reads the container-wide defaults from the bare labels. The
@@ -232,11 +226,11 @@ func parseDefaults(bare *rawCert, defaultKeyType certcrypto.KeyType) (defaults, 
 	return d, warnings
 }
 
-func buildRequest(name string, rc *rawCert, def defaults) (Request, []string) {
+func buildRequest(name string, rc *rawCert, def defaults) (Request, bool, []string) {
+	enabled := true
 	var errs []string
 	req := Request{
 		CertName:    name,
-		Enabled:     true,
 		Path:        rc.kv["path"],
 		ManagerPath: rc.kv["manager-path"],
 	}
@@ -255,11 +249,11 @@ func buildRequest(name string, rc *rawCert, def defaults) (Request, []string) {
 	}
 
 	if v, ok := rc.kv["enable"]; ok {
-		enabled, err := parseEnabled(v)
+		e, err := parseEnabled(v)
 		if err != nil {
 			errs = append(errs, err.Error())
 		} else {
-			req.Enabled = enabled
+			enabled = e
 		}
 	}
 
@@ -304,7 +298,7 @@ func buildRequest(name string, rc *rawCert, def defaults) (Request, []string) {
 		req.KeyType = def.keyType
 	}
 
-	return req, errs
+	return req, enabled, errs
 }
 
 func parseEnabled(v string) (bool, error) {

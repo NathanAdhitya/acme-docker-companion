@@ -123,9 +123,7 @@ func (r *Reconciler) Run(ctx context.Context) {
 	// Subscription starts at the scan start so containers that appear during
 	// the initial scan are not missed (D8).
 	since := r.now()
-	r.resync(ctx)
-	r.process(ctx)
-	r.publish()
+	r.cycle(ctx)
 
 	go r.watchEvents(ctx, since)
 
@@ -139,13 +137,9 @@ func (r *Reconciler) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-r.trigger:
-			r.resync(ctx)
-			r.process(ctx)
-			r.publish()
+			r.cycle(ctx)
 		case <-resyncT.C:
-			r.resync(ctx)
-			r.process(ctx)
-			r.publish()
+			r.cycle(ctx)
 		case <-dueT.C:
 			r.process(ctx)
 			r.publish()
@@ -153,11 +147,17 @@ func (r *Reconciler) Run(ctx context.Context) {
 	}
 }
 
-// Once runs a single reconcile + process cycle (used by --once).
-func (r *Reconciler) Once(ctx context.Context) {
+// cycle rebuilds the demand set from Docker, reconciles it, and publishes the
+// status document.
+func (r *Reconciler) cycle(ctx context.Context) {
 	r.resync(ctx)
 	r.process(ctx)
 	r.publish()
+}
+
+// Once runs a single reconcile + process cycle (used by --once).
+func (r *Reconciler) Once(ctx context.Context) {
+	r.cycle(ctx)
 }
 
 func (r *Reconciler) triggerOnce() {
@@ -372,13 +372,10 @@ func (r *Reconciler) gc(now time.Time, referenced map[string]bool) {
 func (r *Reconciler) process(ctx context.Context) {
 	cyc := &cycle{reloads: map[string]error{}}
 
-	certs := make([]*certState, 0, len(r.certs))
-	for _, cs := range r.certs {
-		certs = append(certs, cs)
-	}
-
+	// r.certs is only mutated by resync on this goroutine, so the workers can
+	// range it directly.
 	var wg sync.WaitGroup
-	for _, cs := range certs {
+	for _, cs := range r.certs {
 		wg.Add(1)
 		go func(cs *certState) {
 			defer wg.Done()
@@ -406,8 +403,6 @@ func (r *Reconciler) processCert(ctx context.Context, cs *certState, cyc *cycle)
 			if err != nil {
 				r.log.Warn("ARI query failed; using the lifetime rule", "cert", cs.id, "ca", m.IssuerCA, "error", err)
 			} else if window != nil {
-				m.ARIStart = window.Start
-				m.ARIEnd = window.End
 				m.ARIRetryAfter = window.RetryAfter
 				m.ARIValid = true
 				if at := window.ShouldRenewAt(now, r.cfg.CheckInterval); at != nil {
@@ -483,9 +478,6 @@ func (r *Reconciler) issue(ctx context.Context, cs *certState) error {
 	// cached certificate; every other candidate gets a fresh order.
 	if m.IssuerCA != "" {
 		req.Prev = &acmex.PrevCert{
-			Domains:   m.Domains,
-			KeyType:   certcrypto.KeyType(m.KeyType),
-			Profile:   m.Profile,
 			IssuerCA:  m.IssuerCA,
 			IssuerURL: m.IssuerURL,
 			CertPEM:   cs.cert.Fullchain,
@@ -640,9 +632,8 @@ func (cs *certState) schedState() scheduler.State {
 
 func (r *Reconciler) schedCfg() scheduler.Config {
 	return scheduler.Config{
-		CheckInterval: r.cfg.CheckInterval,
-		RenewBefore:   r.cfg.RenewBefore,
-		Backoff:       r.cfg.FailureBackoff,
+		RenewBefore: r.cfg.RenewBefore,
+		Backoff:     r.cfg.FailureBackoff,
 	}
 }
 
