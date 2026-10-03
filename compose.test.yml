@@ -1,0 +1,77 @@
+# End-to-end test stack: Pebble (a local ACME server) + pebble-challtestsrv
+# (DNS-01 responder) + acmed + an nginx target. Never touches a production CA.
+#
+# Driven by test/e2e.sh, which copies Pebble's test CA into place before
+# starting acmed.
+name: acmed-e2e
+
+services:
+  challtestsrv:
+    image: ghcr.io/letsencrypt/pebble-challtestsrv:latest
+    command: ["-dnsserver", ":8053", "-management", ":8055", "-defaultIPv4", "127.0.0.1"]
+    ports:
+      - "127.0.0.1:8055:8055"
+    networks: [e2e]
+
+  pebble:
+    image: ghcr.io/letsencrypt/pebble:latest
+    command: ["-config", "/test/config/pebble-config.json", "-dnsserver", "challtestsrv:8053"]
+    environment:
+      PEBBLE_VA_NOSLEEP: "1"
+    ports:
+      - "127.0.0.1:14000:14000"
+    networks: [e2e]
+
+  nginx:
+    image: nginx:alpine
+    volumes:
+      - acme-certs:/etc/nginx/certs:ro
+    labels:
+      # Container default reload, inherited by both certificates.
+      acmed.reload.cmd: "nginx -s reload"
+      acmed.domains: "nginx.test"
+      acmed.path: /etc/nginx/certs/nginx.test
+      # A second certificate in the same container.
+      acmed.api.domains: "api.nginx.test"
+      acmed.api.path: /etc/nginx/certs/api.nginx.test
+    networks: [e2e]
+
+  acmed:
+    build:
+      context: .
+      target: test
+    restart: "no"
+    depends_on: [pebble, challtestsrv, nginx]
+    environment:
+      DOCKER_HOST: unix:///var/run/docker.sock
+      STATE_DIR: /data
+      LOG_LEVEL: debug
+      LABEL_PREFIX: acmed
+      ACME_CA_ORDER: pebble
+      ACME_PEBBLE_URL: https://pebble:14000/dir
+      ACME_PEBBLE_EMAIL: acmed-e2e@example.com
+      ACME_CA_CERT: /ca/pebble.minica.pem
+      ACME_CA_SERVER_NAME: localhost
+      ACME_DNS_PROVIDER: exec
+      ACME_DNS_RESOLVERS: challtestsrv:8053
+      ACME_DNS_DISABLE_AUTHORITATIVE_CHECK: "true"
+      ACME_DNS_PROPAGATION_WAIT: 1s
+      EXEC_PATH: /dns/update-dns.sh
+      EXEC_SEQUENCE_INTERVAL: "5"
+      CHALLTESTSRV_MGMT: http://challtestsrv:8055
+      HTTP_ADDR: ":8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - acmed-data:/data
+      - acme-certs:/certs
+      - ./test/pebble/update-dns.sh:/dns/update-dns.sh:ro
+      - ./test/pebble/pebble.minica.pem:/ca/pebble.minica.pem:ro
+    networks: [e2e]
+
+volumes:
+  acmed-data:
+  acme-certs:
+    name: acmed-e2e-certs
+
+networks:
+  e2e:

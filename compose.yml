@@ -1,0 +1,53 @@
+# Sample acmed deployment.
+#
+# The recommended pattern for many containers is a single shared external
+# named volume (`acme-certs`): the manager mounts it once, every target mounts
+# it, and certificates live in per-certificate subdirectories. That avoids
+# per-project host paths and SELinux relabeling.
+#
+#   docker volume create acme-certs
+#   cp secrets/.env.example secrets/.env   # then edit it
+#   docker compose up -d
+#
+services:
+  acmed:
+    build: .
+    # Use an image instead of building locally once published:
+    # image: ghcr.io/nathanadhitya/acmed:latest
+    restart: unless-stopped
+    env_file:
+      - ./secrets/.env
+    environment:
+      DOCKER_HOST: unix:///var/run/docker.sock
+      STATE_DIR: /data
+      ACME_DNS_RESOLVERS: 1.1.1.1:53,8.8.8.8:53
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - acmed-data:/data
+      - acme-certs:/certs
+    ports:
+      - "127.0.0.1:8080:8080" # optional: /healthz status endpoint
+    healthcheck:
+      test: ["CMD", "/acmed", "healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # Example target. Replace with your own service.
+  web:
+    image: nginx:alpine
+    restart: unless-stopped
+    volumes:
+      # The target may mount the shared volume read-only; acmed writes through
+      # its own read-write mount of the same source.
+      - acme-certs:/etc/nginx/certs:ro
+    labels:
+      acmed.domains: "example.com,*.example.com"
+      acmed.path: /etc/nginx/certs/example.com
+      acmed.reload.cmd: "nginx -s reload"
+
+volumes:
+  acmed-data:
+  acme-certs:
+    external: true

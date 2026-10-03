@@ -1,0 +1,13 @@
+.git
+.github
+.gitignore
+.dockerignore
+*.md
+Makefile
+compose*.yml
+secrets
+test
+bin
+data
+*.test
+coverage.out

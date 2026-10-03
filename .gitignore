@@ -1,0 +1,12 @@
+# Secrets and local state
+secrets/.env
+secrets/*
+!secrets/.env.example
+test/pebble/pebble.minica.pem
+data/
+bin/
+
+# Build/test artifacts
+/acmed
+*.test
+coverage.out
