@@ -136,6 +136,27 @@ func TestNamedCertDisableOnlyAffectsItself(t *testing.T) {
 	}
 }
 
+// TestInvalidDefaultReloadDropsDefaults: an invalid default reload action is
+// warned about and not inherited by certificates.
+func TestInvalidDefaultReloadDropsDefaults(t *testing.T) {
+	lbls := map[string]string{
+		"acmed.reload.cmd":    "nginx -s reload",
+		"acmed.reload.signal": "SIGNOPE",
+		"acmed.api.domains":   "api.example.com",
+		"acmed.api.path":      "/certs/api.example.com",
+	}
+	reqs, warns := Parse("acmed", lbls, certcrypto.EC256)
+	if len(warns) == 0 {
+		t.Fatal("expected a warning about the invalid default signal")
+	}
+	if len(reqs) != 1 {
+		t.Fatalf("want 1 certificate, got %d", len(reqs))
+	}
+	if reqs[0].ReloadCmd != "" || reqs[0].ReloadSignal != "" {
+		t.Fatalf("invalid defaults must not be inherited: %q/%q", reqs[0].ReloadCmd, reqs[0].ReloadSignal)
+	}
+}
+
 // TestGlobalKeyTypeDefault: without acmed.key-type the global default applies.
 func TestGlobalKeyTypeDefault(t *testing.T) {
 	reqs, warns := Parse("acmed", map[string]string{

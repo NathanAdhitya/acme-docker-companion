@@ -137,35 +137,23 @@ func (d *dockerClient) Exec(ctx context.Context, id string, cmd []string, timeou
 	var stdout, stderr bytes.Buffer
 	_, _ = stdcopy.StdCopy(&stdout, &stderr, attached.Reader)
 
-	exitCode, ierr := d.waitExec(ctx, created.ID)
+	// The attach stream reaches EOF when the exec process exits, so a single
+	// inspect collects the exit code.
+	res, ierr := d.cli.ExecInspect(ctx, created.ID, client.ExecInspectOptions{})
 	out := stdout.String()
 	if stderr.Len() > 0 {
 		out += stderr.String()
 	}
 	if ierr != nil {
-		return out, ierr
+		return out, fmt.Errorf("exec inspect: %w", ierr)
 	}
-	if exitCode != 0 {
-		return out, fmt.Errorf("command exited with code %d", exitCode)
+	if res.Running {
+		return out, fmt.Errorf("exec %s is still running after its output stream closed", created.ID)
+	}
+	if res.ExitCode != 0 {
+		return out, fmt.Errorf("command exited with code %d", res.ExitCode)
 	}
 	return out, nil
-}
-
-func (d *dockerClient) waitExec(ctx context.Context, execID string) (int, error) {
-	for {
-		res, err := d.cli.ExecInspect(ctx, execID, client.ExecInspectOptions{})
-		if err != nil {
-			return -1, fmt.Errorf("exec inspect: %w", err)
-		}
-		if !res.Running {
-			return res.ExitCode, nil
-		}
-		select {
-		case <-ctx.Done():
-			return -1, ctx.Err()
-		case <-time.After(50 * time.Millisecond):
-		}
-	}
 }
 
 func (d *dockerClient) Kill(ctx context.Context, id string, signal string) error {

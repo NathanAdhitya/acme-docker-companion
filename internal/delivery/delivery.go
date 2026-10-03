@@ -111,19 +111,9 @@ func WriteCert(dir string, c *store.Cert, opts Options) (changed bool, err error
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return false, fmt.Errorf("create certificate dir %s: %w", dir, err)
 	}
-	entries := []struct {
-		name string
-		data []byte
-		mode os.FileMode
-	}{
-		{store.FileFullchain, c.Fullchain, opts.CertMode},
-		{store.FileCert, c.CertPEM, opts.CertMode},
-		{store.FileChain, c.Chain, opts.CertMode},
-		{store.FilePrivkey, c.Privkey, opts.KeyMode},
-	}
-	for _, e := range entries {
-		p := path.Join(dir, e.name)
-		if len(e.data) == 0 {
+	for _, f := range store.CertFiles(c, opts.CertMode, opts.KeyMode) {
+		p := path.Join(dir, f.Name)
+		if len(f.Data) == 0 {
 			// Nothing to write (e.g. a bundle with no intermediates): remove
 			// any stale file left by a previous certificate.
 			if _, serr := os.Stat(p); serr == nil {
@@ -134,11 +124,11 @@ func WriteCert(dir string, c *store.Cert, opts Options) (changed bool, err error
 			}
 			continue
 		}
-		c, werr := fsutil.WriteFileAtomic(p, e.data, e.mode, opts.UID, opts.GID)
+		written, werr := fsutil.WriteFileAtomic(p, f.Data, f.Mode, opts.UID, opts.GID)
 		if werr != nil {
 			return changed, werr
 		}
-		changed = changed || c
+		changed = changed || written
 	}
 	return changed, nil
 }

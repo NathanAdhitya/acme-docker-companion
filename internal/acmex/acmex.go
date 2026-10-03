@@ -123,11 +123,8 @@ type caClient struct {
 
 // NewManager constructs the ACME manager.
 func NewManager(cfg *config.Config, st *store.Store, log *slog.Logger) (*Manager, error) {
-	if cfg.DNSProvider == "" {
-		return nil, errors.New("DNS provider is not configured")
-	}
-	// Build the provider once; a typo fails fast at startup and each CA client
-	// reuses the same instance.
+	// Build the provider once; an unknown or misconfigured provider fails fast
+	// at startup and each CA client reuses the same instance.
 	provider, err := dns.NewDNSChallengeProviderByName(cfg.DNSProvider)
 	if err != nil {
 		return nil, fmt.Errorf("DNS provider %q: %w", cfg.DNSProvider, err)
@@ -503,17 +500,9 @@ func buildHTTPClient(caCert, serverName string) (*http.Client, error) {
 			return nil, fmt.Errorf("ACME_CA_CERT %s contains no usable certificates", p)
 		}
 	}
-	return &http.Client{
-		Timeout: 2 * time.Minute,
-		Transport: &http.Transport{
-			Proxy: http.ProxyFromEnvironment,
-			DialContext: (&net.Dialer{
-				Timeout:   30 * time.Second,
-				KeepAlive: 30 * time.Second,
-			}).DialContext,
-			TLSHandshakeTimeout:   30 * time.Second,
-			ResponseHeaderTimeout: 30 * time.Second,
-			TLSClientConfig:       &tls.Config{RootCAs: pool, ServerName: serverName},
-		},
-	}, nil
+	// Start from the standard transport (proxy, dial timeouts, HTTP/2) and
+	// override only the trust anchors and SNI.
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.TLSClientConfig = &tls.Config{RootCAs: pool, ServerName: serverName}
+	return &http.Client{Timeout: 2 * time.Minute, Transport: tr}, nil
 }

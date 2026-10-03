@@ -1,7 +1,7 @@
 # acme-docker-companion — Design Document
 
 Status: design; implementation complete and verified (see §20)
-Last updated: 2026-10-03
+Last updated: 2026-10-04
 
 This document describes **what acmed is and how it is designed to work**. It
 replaces the earlier milestone-oriented plan.
@@ -220,7 +220,9 @@ labels:
 - `path` must be absolute and unique per container; two certificates may not
   share a directory.
 - `reload.cmd` and `reload.signal` are mutually exclusive at each level; a
-  per-cert action replaces the inherited container default entirely.
+  per-cert action replaces the inherited container default entirely. An invalid
+  default is dropped with a warning; an invalid per-cert action omits only that
+  certificate.
 - Invalid labels produce **per-container warnings**; a broken named certificate
   never invalidates the others, and never crashes the manager.
 - A container that defines defaults but no certificates logs one warning and is
@@ -285,6 +287,9 @@ provider, unreadable EAB secret). Per-container label problems are warnings.
 - Every issuance/renewal walks the candidate order: the per-cert `acmed.ca`
   override if set, otherwise `ACME_CA_ORDER`. Unknown names are skipped with a
   warning; a certificate with no remaining candidates is skipped.
+- When several containers request the same certificate with different
+  `acmed.ca` overrides, the lexicographically smallest resolved candidate list
+  wins, so the choice does not depend on Docker's container order.
 - The first CA that succeeds issues the certificate; `issuerCA` and `issuerURL`
   are recorded in `meta.json`.
 - **Cache validity (D1):** a usable cached certificate is reused until it is
@@ -318,9 +323,9 @@ provider, unreadable EAB secret). Per-container label problems are warnings.
   plus on startup and on demand.
 - **ARI first:** `GetRenewalInfo` → `ShouldRenewAt(now, willingToSleep)` (the
   RFC 9773 algorithm is lego's, not reimplemented); the drawn instant is
-  selected once per window and honored — a nil draw waits for the next refresh;
-  `RetryAfter` stretches the next ARI refresh interval; renew with
-  `UseARICertID`.
+  selected once per window, persisted in `meta.json`, and honored — a nil draw
+  waits for the next refresh; `RetryAfter` stretches the next ARI refresh
+  interval; renew with `UseARICertID`.
 - **Fallback (no ARI):** renew two thirds through the lifetime; halfway for
   certificates shorter than ten days. Optional `RENEW_BEFORE` override.
 - **Backoff:** persisted per certificate, `1m → 10m → 100m → 24h`, gating every
@@ -528,8 +533,8 @@ Implemented and verified:
   state (D12).
 - CA failover, per-CA accounts and cooldowns (one cached lego client per CA, so
   the directory is fetched once), ARI-first renewal delegated to lego with one
-  draw per window, backoff-gated issuance on every path, GC of expired
-  unreferenced certificates.
+  draw per window persisted in `meta.json`, backoff-gated issuance on every
+  path, GC of expired unreferenced certificates.
 - Bind-mount delivery with automatic source mapping, atomic writes, reload
   retry, dry-run and staging behavior. The status endpoint serves a snapshot
   published each cycle and never blocks behind an issuance.

@@ -60,6 +60,19 @@ func TestHTTPAddrHonorsFileConvention(t *testing.T) {
 	}
 }
 
+// TestUnreadableEABSecretFailsFast: an EAB HMAC configured through _FILE but
+// unreadable is a fatal configuration error, not a silent downgrade to a
+// registration without EAB (DESIGN §7).
+func TestUnreadableEABSecretFailsFast(t *testing.T) {
+	clearACMEEnv(t)
+	t.Setenv("ACME_DNS_PROVIDER", "exec")
+	t.Setenv("ACME_LETSENCRYPT_EAB_HMAC_FILE", filepath.Join(t.TempDir(), "missing"))
+
+	if _, _, err := Load(false); err == nil {
+		t.Fatal("expected Load to fail fast when the EAB secret file is unreadable")
+	}
+}
+
 func TestPrivateCAAndDNSOptions(t *testing.T) {
 	clearACMEEnv(t)
 	t.Setenv("ACME_DNS_PROVIDER", "exec")

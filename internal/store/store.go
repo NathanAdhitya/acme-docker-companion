@@ -63,6 +63,26 @@ type Cert struct {
 	Chain     []byte
 }
 
+// File is one certificate file in the fixed set of DESIGN Appendix B: its
+// name, content and mode. Data is nil for a file the certificate does not have
+// (e.g. a chain with no intermediates), which lets callers remove a stale copy.
+type File struct {
+	Name string
+	Data []byte
+	Mode os.FileMode
+}
+
+// CertFiles lists a certificate's files in the fixed order of DESIGN
+// Appendix B, with the certificate and key modes applied.
+func CertFiles(c *Cert, certMode, keyMode os.FileMode) []File {
+	return []File{
+		{FileFullchain, c.Fullchain, certMode},
+		{FileCert, c.CertPEM, certMode},
+		{FileChain, c.Chain, certMode},
+		{FilePrivkey, c.Privkey, keyMode},
+	}
+}
+
 // Store is the on-disk state directory.
 type Store struct {
 	dir  string
@@ -226,23 +246,12 @@ func (s *Store) LoadCert(id string) (*Cert, error) {
 // meta, so failure/backoff state survives a restart.
 func (s *Store) SaveCert(c *Cert, uid, gid int, certMode, keyMode os.FileMode) error {
 	dir := filepath.Join(s.dir, "certs", c.ID)
-	type entry struct {
-		name string
-		data []byte
-		mode os.FileMode
-	}
-	entries := []entry{
-		{FileFullchain, c.Fullchain, certMode},
-		{FileCert, c.CertPEM, certMode},
-		{FileChain, c.Chain, certMode},
-		{FilePrivkey, c.Privkey, keyMode},
-	}
-	for _, e := range entries {
-		if len(e.data) == 0 {
+	for _, f := range CertFiles(c, certMode, keyMode) {
+		if len(f.Data) == 0 {
 			continue
 		}
-		if _, err := fsutil.WriteFileAtomic(filepath.Join(dir, e.name), e.data, e.mode, uid, gid); err != nil {
-			return fmt.Errorf("write %s for %s: %w", e.name, c.ID, err)
+		if _, err := fsutil.WriteFileAtomic(filepath.Join(dir, f.Name), f.Data, f.Mode, uid, gid); err != nil {
+			return fmt.Errorf("write %s for %s: %w", f.Name, c.ID, err)
 		}
 	}
 	metaBytes, err := json.MarshalIndent(&c.Meta, "", "  ")

@@ -242,19 +242,14 @@ func (r *Reconciler) resync(ctx context.Context) {
 		}
 	}
 
-	// Every target is stale until the parse below finds it again.
+	// Every target is stale until the parse below finds it again, and CA
+	// candidates are recomputed from this cycle's requests alone.
 	for _, cs := range r.certs {
+		cs.candidates = nil
 		for _, t := range cs.targets {
 			t.stale = true
 		}
 	}
-
-	// CA candidates are resolved from this cycle's requests and refreshed each
-	// resync, so a container recreated with a different acmed.ca is honoured
-	// without a restart. When containers disagree about one certificate's
-	// override, the lexicographically smallest list wins, making the choice
-	// independent of Docker's container order.
-	chosen := map[string][]string{}
 
 	referenced := map[string]bool{}
 	for _, c := range containers {
@@ -276,9 +271,6 @@ func (r *Reconciler) resync(ctx context.Context) {
 				addWarn(fmt.Sprintf("container %s: certificate %q has no usable CA candidates", c.Name, strings.Join(req.Domains, ",")))
 				continue
 			}
-			if prev, seen := chosen[id]; !seen || lessCandidates(cands, prev) {
-				chosen[id] = cands
-			}
 
 			cs := r.certs[id]
 			if cs == nil {
@@ -296,7 +288,14 @@ func (r *Reconciler) resync(ctx context.Context) {
 				r.loadCached(cs)
 				r.certs[id] = cs
 			}
-			cs.candidates = chosen[id]
+			// Candidates are refreshed each resync, so a container recreated
+			// with a different acmed.ca is honoured without a restart. When
+			// containers disagree about one certificate's override, the
+			// lexicographically smallest resolved list wins, independent of
+			// Docker's container order (DESIGN §8).
+			if cs.candidates == nil || lessCandidates(cands, cs.candidates) {
+				cs.candidates = cands
+			}
 			referenced[id] = true
 
 			// Surviving targets keep their delivery/reload state; new ones
@@ -416,9 +415,12 @@ func (r *Reconciler) processCert(ctx context.Context, cs *certState, cyc *cycle)
 
 	// Refresh ARI for a usable certificate and draw the renewal instant once
 	// per window (RFC 9773). Re-drawing on every tick would bias renewal to
-	// the start of the window; a nil draw waits for the next refresh.
+	// the start of the window; a nil draw waits for the next refresh. The
+	// drawn window is persisted so a restart does not re-draw it (DESIGN §12).
+	ariRefreshed := false
 	if usable && m.IssuerCA != "" {
 		if m.ARICheckedAt.IsZero() || now.Sub(m.ARICheckedAt) >= r.ariRefreshAfter(cs) {
+			ariRefreshed = true
 			window, err := r.issuer.RenewalInfo(ctx, m.IssuerCA, cs.leaf)
 			m.ARICheckedAt = now
 			m.ARIValid = false
@@ -434,6 +436,9 @@ func (r *Reconciler) processCert(ctx context.Context, cs *certState, cyc *cycle)
 				}
 			}
 		}
+	}
+	if ariRefreshed {
+		r.persist(cs)
 	}
 
 	sched := r.schedCfg()
@@ -615,11 +620,15 @@ func (r *Reconciler) runReload(ctx context.Context, cs *certState, t *targetStat
 	cyc.mu.Lock()
 	outcome, done := cyc.reloads[key]
 	if !done {
+		var output string
 		switch kind {
 		case "cmd":
-			_, outcome = r.docker.Exec(ctx, t.containerID, []string{"/bin/sh", "-c", value}, reloadTimeout)
+			output, outcome = r.docker.Exec(ctx, t.containerID, []string{"/bin/sh", "-c", value}, reloadTimeout)
 		case "signal":
 			outcome = r.docker.Kill(ctx, t.containerID, value)
+		}
+		if outcome != nil && output != "" {
+			r.log.Error("reload command failed", "container", t.containerName, "output", strings.TrimSpace(output), "error", outcome)
 		}
 		cyc.reloads[key] = outcome
 	}

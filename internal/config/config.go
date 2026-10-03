@@ -82,15 +82,13 @@ type Config struct {
 // DefaultBackoff is the retry schedule recommended by Let's Encrypt.
 var DefaultBackoff = []time.Duration{1 * time.Minute, 10 * time.Minute, 100 * time.Minute, 24 * time.Hour}
 
-// caAliases maps friendly names to canonical lego CA codes.
+// caAliases maps friendly names to canonical lego CA codes. Only the aliases
+// documented in secrets/.env.example live here; other names are lego codes.
 var caAliases = map[string]string{
-	"gts":              "googletrust",
-	"gts-staging":      "googletrust-staging",
-	"google":           "googletrust",
-	"google-staging":   "googletrust-staging",
-	"le":               "letsencrypt",
-	"le-staging":       "letsencrypt-staging",
-	"letsencrypt-prod": "letsencrypt",
+	"gts":         "googletrust",
+	"gts-staging": "googletrust-staging",
+	"le":          "letsencrypt",
+	"le-staging":  "letsencrypt-staging",
 }
 
 // stagingCounterpart maps production codes to their staging equivalents.
@@ -260,13 +258,20 @@ func resolveCA(name string, cfg *Config) (CAConfig, error) {
 		email = cfg.DefaultEmail
 	}
 
+	// An EAB HMAC that is configured but unreadable is a fatal config error
+	// rather than a silent downgrade to a registration without EAB (DESIGN §7).
+	eabHMAC, err := envSecret("ACME_" + envName + "_EAB_HMAC")
+	if err != nil {
+		return CAConfig{}, err
+	}
+
 	return CAConfig{
 		Name:           name,
 		URL:            url,
 		Environment:    environment,
 		Email:          email,
 		EABKid:         env("ACME_" + envName + "_EAB_KID"),
-		EABHMAC:        env("ACME_" + envName + "_EAB_HMAC"),
+		EABHMAC:        eabHMAC,
 		AccountKeyFile: env("ACME_" + envName + "_ACCOUNT_KEY_FILE"),
 	}, nil
 }
@@ -410,6 +415,24 @@ func envDefault(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// envSecret reads key like env, but reports an unreadable key_FILE path
+// instead of silently treating the secret as unset. It is used for secrets
+// whose absence must fail fast at startup (DESIGN §7).
+func envSecret(key string) (string, error) {
+	if v, ok := os.LookupEnv(key); ok && v != "" {
+		return v, nil
+	}
+	p := os.Getenv(key + "_FILE")
+	if p == "" {
+		return "", nil
+	}
+	b, err := os.ReadFile(p)
+	if err != nil {
+		return "", fmt.Errorf("read %s_FILE %s: %w", key, p, err)
+	}
+	return strings.TrimRight(string(b), "\r\n"), nil
 }
 
 func envBool(key string, def bool) bool {

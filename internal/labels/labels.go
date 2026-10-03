@@ -7,6 +7,7 @@
 package labels
 
 import (
+	"errors"
 	"fmt"
 	"path"
 	"regexp"
@@ -195,6 +196,20 @@ func splitKey(rest string) (name, field string, ok bool) {
 	return candidate, f, true
 }
 
+// validateReload enforces the reload action rules shared by the container
+// defaults and per-certificate parsing: cmd and signal are mutually exclusive,
+// and the signal must be in the allowed set. Callers decide the consequence of
+// a violation (dropping defaults vs. invalidating a certificate).
+func validateReload(cmd, signal string) error {
+	if cmd != "" && signal != "" {
+		return errors.New("acmed.reload.cmd and acmed.reload.signal are mutually exclusive")
+	}
+	if signal != "" && !allowedSignals[signal] {
+		return fmt.Errorf("invalid acmed.reload.signal %q", signal)
+	}
+	return nil
+}
+
 // parseDefaults reads the container-wide defaults from the bare labels. The
 // global key type is the starting default; a bare acmed.key-type overrides it.
 func parseDefaults(bare *rawCert, defaultKeyType certcrypto.KeyType) (defaults, []string) {
@@ -206,13 +221,9 @@ func parseDefaults(bare *rawCert, defaultKeyType certcrypto.KeyType) (defaults, 
 
 	d.reloadCmd = bare.kv["reload.cmd"]
 	d.reloadSignal = strings.ToUpper(bare.kv["reload.signal"])
-	if d.reloadCmd != "" && d.reloadSignal != "" {
-		warnings = append(warnings, "acmed.reload.cmd and acmed.reload.signal are mutually exclusive; ignoring both as defaults")
+	if err := validateReload(d.reloadCmd, d.reloadSignal); err != nil {
+		warnings = append(warnings, fmt.Sprintf("%s; ignoring the reload defaults", err))
 		d.reloadCmd, d.reloadSignal = "", ""
-	}
-	if d.reloadSignal != "" && !allowedSignals[d.reloadSignal] {
-		warnings = append(warnings, fmt.Sprintf("invalid acmed.reload.signal %q", d.reloadSignal))
-		d.reloadSignal = ""
 	}
 	d.cas = splitCA(bare.kv["ca"])
 	if v := bare.kv["key-type"]; v != "" {
@@ -241,11 +252,8 @@ func buildRequest(name string, rc *rawCert, def defaults) (Request, bool, []stri
 	if req.ReloadCmd == "" && req.ReloadSignal == "" {
 		req.ReloadCmd, req.ReloadSignal = def.reloadCmd, def.reloadSignal
 	}
-	if req.ReloadCmd != "" && req.ReloadSignal != "" {
-		errs = append(errs, "acmed.reload.cmd and acmed.reload.signal are mutually exclusive")
-	}
-	if req.ReloadSignal != "" && !allowedSignals[req.ReloadSignal] {
-		errs = append(errs, fmt.Sprintf("invalid acmed.reload.signal %q", req.ReloadSignal))
+	if err := validateReload(req.ReloadCmd, req.ReloadSignal); err != nil {
+		errs = append(errs, err.Error())
 	}
 
 	if v, ok := rc.kv["enable"]; ok {

@@ -322,6 +322,49 @@ func TestCandidatesRefreshOnLabelChange(t *testing.T) {
 	}
 }
 
+// TestCandidateConflictResolvesDeterministically: when two containers request
+// the same certificate with different acmed.ca overrides, the lexicographically
+// smallest resolved candidate list wins, independent of Docker's container
+// order (DESIGN §8).
+func TestCandidateConflictResolvesDeterministically(t *testing.T) {
+	cfg := testConfig(t, testCAURL)
+	cfg.CAOrder = []string{"letsencrypt", "gts"}
+	cfg.CAs["gts"] = config.CAConfig{Name: "gts", URL: "https://acme.gts.example/directory", Environment: config.EnvProduction}
+	st := openTestStore(t, cfg)
+
+	docker := &fakeDocker{
+		containers: []dockerx.Container{
+			{ID: "c1", Name: "web", Labels: map[string]string{
+				"acmed.domains": "example.com",
+				"acmed.path":    "/etc/nginx/certs/example.com",
+				"acmed.ca":      "letsencrypt",
+			}},
+			{ID: "c2", Name: "api", Labels: map[string]string{
+				"acmed.domains": "example.com",
+				"acmed.path":    "/etc/nginx/certs/api.example.com",
+				"acmed.ca":      "gts",
+			}},
+		},
+		self:   dockerx.Container{ID: "self"},
+		selfOK: true,
+	}
+	issuer := &fakeIssuer{issued: makeIssued(t, []string{"example.com"}, testCAURL)}
+
+	rec := New(cfg, docker, issuer, st, testLogger())
+	rec.Once(context.Background())
+
+	snap := rec.Snapshot()
+	if len(snap.Certs) != 1 {
+		t.Fatalf("want one shared certificate, got %d", len(snap.Certs))
+	}
+	if got := snap.Certs[0].Candidates; !slices.Equal(got, []string{"gts"}) {
+		t.Fatalf("candidates = %v, want [gts] (smallest list wins)", got)
+	}
+	if len(snap.Certs[0].Targets) != 2 {
+		t.Fatalf("want two targets, got %+v", snap.Certs[0].Targets)
+	}
+}
+
 // TestCacheValidRequiresPrivateKey: a cached certificate whose private key is
 // missing is not usable, so delivery cannot remove the target's key.
 func TestCacheValidRequiresPrivateKey(t *testing.T) {
