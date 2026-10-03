@@ -5,6 +5,7 @@ package reconciler
 import (
 	"context"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
@@ -69,26 +70,16 @@ type cycle struct {
 	reloads map[string]error
 }
 
+// certState is one certificate's live state. Identity, scheduling, ARI and
+// failure state all live in cert.Meta — the same struct that is persisted — so
+// there is a single source of truth. cert is always non-nil; its PEM material
+// is empty until the certificate is issued.
 type certState struct {
-	id             string
-	domains        []string
-	keyType        certcrypto.KeyType
-	profile        string
-	preferredChain string
-	candidates     []string
-
-	cert         *store.Cert
-	leaf         *x509.Certificate
-	ari          *acmex.ARIWindow
-	ariRenewAt   time.Time
-	ariCheckedAt time.Time
-
-	failures    int
-	nextAttempt time.Time
-	lastAttempt time.Time
-	lastError   string
-
-	targets map[string]*targetState
+	id         string
+	candidates []string
+	cert       *store.Cert
+	leaf       *x509.Certificate
+	targets    map[string]*targetState
 }
 
 type targetState struct {
@@ -101,7 +92,7 @@ type targetState struct {
 
 	misconfigured string
 
-	needsDelivery bool
+	delivered     bool
 	pendingReload bool
 	reloadState   string
 	lastErr       string
@@ -257,16 +248,12 @@ func (r *Reconciler) resync(ctx context.Context) {
 		if ok && c.ID == self.ID {
 			continue
 		}
-		reqs, warns := labels.Parse(r.cfg.LabelPrefix, c.Labels)
+		reqs, warns := labels.Parse(r.cfg.LabelPrefix, c.Labels, r.cfg.KeyType)
 		for _, w := range warns {
 			addWarn(fmt.Sprintf("container %s: %s", c.Name, w))
 		}
 		for _, req := range reqs {
-			kt := req.KeyType
-			if kt == "" {
-				kt = r.cfg.KeyType
-			}
-			id := store.CertID(req.Domains, kt, r.cfg.Profile)
+			id := store.CertID(req.Domains, req.KeyType, r.cfg.Profile)
 
 			cs := r.certs[id]
 			if cs == nil {
@@ -279,13 +266,16 @@ func (r *Reconciler) resync(ctx context.Context) {
 					continue
 				}
 				cs = &certState{
-					id:             id,
-					domains:        req.Domains,
-					keyType:        kt,
-					profile:        r.cfg.Profile,
-					preferredChain: r.cfg.PreferredChain,
-					candidates:     cands,
-					targets:        map[string]*targetState{},
+					id:         id,
+					candidates: cands,
+					cert: &store.Cert{ID: id, Meta: store.Meta{
+						ID:             id,
+						Domains:        req.Domains,
+						KeyType:        string(req.KeyType),
+						Profile:        r.cfg.Profile,
+						PreferredChain: r.cfg.PreferredChain,
+					}},
+					targets: map[string]*targetState{},
 				}
 				r.loadCached(cs)
 				r.certs[id] = cs
@@ -297,7 +287,7 @@ func (r *Reconciler) resync(ctx context.Context) {
 			key := c.ID + "|" + req.Path
 			t := cs.targets[key]
 			if t == nil {
-				t = &targetState{containerID: c.ID, needsDelivery: true}
+				t = &targetState{containerID: c.ID}
 				cs.targets[key] = t
 			}
 			t.stale = false
@@ -350,19 +340,6 @@ func (r *Reconciler) loadCached(cs *certState) {
 	}
 	cs.cert = cert
 	cs.leaf = parseLeaf(cert.CertPEM)
-	cs.failures = cert.Meta.ConsecutiveFailures
-	cs.nextAttempt = cert.Meta.NextAttempt
-	cs.lastAttempt = cert.Meta.LastAttempt
-	cs.lastError = cert.Meta.LastError
-	if cert.Meta.ARIValid {
-		cs.ari = &acmex.ARIWindow{
-			Start:      cert.Meta.ARIStart,
-			End:        cert.Meta.ARIEnd,
-			RetryAfter: cert.Meta.ARIRetryAfter,
-		}
-		cs.ariRenewAt = cert.Meta.ARIRenewAt
-	}
-	cs.ariCheckedAt = cert.Meta.ARICheckedAt
 }
 
 // gc removes expired certificates that no running container references.
@@ -414,22 +391,27 @@ func (r *Reconciler) process(ctx context.Context) {
 func (r *Reconciler) processCert(ctx context.Context, cs *certState, cyc *cycle) {
 	now := r.now()
 	usable := cs.cacheValid()
+	m := &cs.cert.Meta
 
 	// Refresh ARI for a usable certificate and draw the renewal instant once
 	// per window (RFC 9773). Re-drawing on every tick would bias renewal to
 	// the start of the window; a nil draw waits for the next refresh.
-	if usable && cs.cert.Meta.IssuerCA != "" {
-		if cs.ariCheckedAt.IsZero() || now.Sub(cs.ariCheckedAt) >= r.ariRefreshAfter(cs) {
-			window, err := r.issuer.RenewalInfo(ctx, cs.cert.Meta.IssuerCA, cs.leaf)
-			cs.ariCheckedAt = now
-			cs.ari = nil
-			cs.ariRenewAt = time.Time{}
+	if usable && m.IssuerCA != "" {
+		if m.ARICheckedAt.IsZero() || now.Sub(m.ARICheckedAt) >= r.ariRefreshAfter(cs) {
+			window, err := r.issuer.RenewalInfo(ctx, m.IssuerCA, cs.leaf)
+			m.ARICheckedAt = now
+			m.ARIValid = false
+			m.ARIRetryAfter = 0
+			m.ARIRenewAt = time.Time{}
 			if err != nil {
-				r.log.Warn("ARI query failed; using the lifetime rule", "cert", cs.id, "ca", cs.cert.Meta.IssuerCA, "error", err)
+				r.log.Warn("ARI query failed; using the lifetime rule", "cert", cs.id, "ca", m.IssuerCA, "error", err)
 			} else if window != nil {
-				cs.ari = window
+				m.ARIStart = window.Start
+				m.ARIEnd = window.End
+				m.ARIRetryAfter = window.RetryAfter
+				m.ARIValid = true
 				if at := window.ShouldRenewAt(now, r.cfg.CheckInterval); at != nil {
-					cs.ariRenewAt = *at
+					m.ARIRenewAt = *at
 				}
 			}
 		}
@@ -440,11 +422,18 @@ func (r *Reconciler) processCert(ctx context.Context, cs *certState, cyc *cycle)
 	st.ForceRenew = !usable
 	if scheduler.ShouldRenew(now, st, sched) {
 		if err := r.issue(ctx, cs); err != nil {
-			cs.failures++
-			cs.lastAttempt = now
-			cs.lastError = err.Error()
-			cs.nextAttempt = now.Add(scheduler.BackoffDuration(cs.failures, sched))
-			r.log.Error("certificate issuance failed", "cert", cs.id, "domains", strings.Join(cs.domains, ","), "failures", cs.failures, "error", err)
+			if errors.Is(err, acmex.ErrCoolingDown) {
+				// No order was attempted, so do not grow the failure backoff;
+				// the next tick retries once a cooldown lapses.
+				m.LastError = err.Error()
+				r.log.Info("issuance deferred; all candidate CAs are cooling down", "cert", cs.id, "error", err)
+			} else {
+				m.ConsecutiveFailures++
+				m.LastAttempt = now
+				m.LastError = err.Error()
+				m.NextAttempt = now.Add(scheduler.BackoffDuration(m.ConsecutiveFailures, sched))
+				r.log.Error("certificate issuance failed", "cert", cs.id, "domains", strings.Join(m.Domains, ","), "failures", m.ConsecutiveFailures, "error", err)
+			}
 			r.persist(cs)
 		}
 	}
@@ -461,15 +450,15 @@ func (r *Reconciler) processCert(ctx context.Context, cs *certState, cyc *cycle)
 // keeps serving until it is due, so CA or staging changes never force
 // reissuance (the cache protects ACME rate limits).
 func (cs *certState) cacheValid() bool {
-	return cs.cert != nil && cs.leaf != nil && len(cs.cert.Fullchain) > 0
+	return cs.leaf != nil && len(cs.cert.Fullchain) > 0
 }
 
 // ariRefreshAfter is how long to wait before querying ARI again: our own
 // check cadence, stretched when the server asked for a longer Retry-After.
 func (r *Reconciler) ariRefreshAfter(cs *certState) time.Duration {
 	d := r.cfg.CheckInterval
-	if cs.ari != nil {
-		d = max(d, cs.ari.RetryAfter)
+	if m := cs.cert.Meta; m.ARIValid && m.ARIRetryAfter > d {
+		d = m.ARIRetryAfter
 	}
 	return d
 }
@@ -482,22 +471,23 @@ func (r *Reconciler) issue(ctx context.Context, cs *certState) error {
 		return ctx.Err()
 	}
 
+	m := &cs.cert.Meta
 	req := acmex.IssueRequest{
-		Domains:        cs.domains,
-		KeyType:        cs.keyType,
-		Profile:        cs.profile,
-		PreferredChain: cs.preferredChain,
+		Domains:        m.Domains,
+		KeyType:        certcrypto.KeyType(m.KeyType),
+		Profile:        m.Profile,
+		PreferredChain: m.PreferredChain,
 		Candidates:     cs.candidates,
 	}
 	// The manager renews in place only against the CA endpoint that issued the
 	// cached certificate; every other candidate gets a fresh order.
-	if cs.cert != nil && cs.cert.Meta.IssuerCA != "" {
+	if m.IssuerCA != "" {
 		req.Prev = &acmex.PrevCert{
-			Domains:   cs.cert.Meta.Domains,
-			KeyType:   cs.keyType,
-			Profile:   cs.profile,
-			IssuerCA:  cs.cert.Meta.IssuerCA,
-			IssuerURL: cs.cert.Meta.IssuerURL,
+			Domains:   m.Domains,
+			KeyType:   certcrypto.KeyType(m.KeyType),
+			Profile:   m.Profile,
+			IssuerCA:  m.IssuerCA,
+			IssuerURL: m.IssuerURL,
 			CertPEM:   cs.cert.Fullchain,
 			KeyPEM:    cs.cert.Privkey,
 		}
@@ -509,46 +499,33 @@ func (r *Reconciler) issue(ctx context.Context, cs *certState) error {
 	}
 
 	now := r.now()
-	c := &store.Cert{
-		ID:        cs.id,
-		Fullchain: res.CertPEM,
-		Privkey:   res.KeyPEM,
-		CertPEM:   res.LeafPEM,
-		Chain:     res.ChainPEM,
-		Meta: store.Meta{
-			ID:             cs.id,
-			Domains:        cs.domains,
-			KeyType:        string(cs.keyType),
-			Profile:        cs.profile,
-			PreferredChain: cs.preferredChain,
-			IssuerCA:       res.IssuerCA,
-			IssuerURL:      res.IssuerURL,
-			CertURL:        res.CertURL,
-			NotBefore:      res.NotBefore,
-			NotAfter:       res.NotAfter,
-			ObtainedAt:     now,
-		},
-	}
-	if err := r.store.SaveCert(c, r.cfg.FileUID, r.cfg.FileGID, r.cfg.FileMode, r.cfg.KeyMode); err != nil {
+	cs.cert.Fullchain = res.FullchainPEM
+	cs.cert.Privkey = res.KeyPEM
+	cs.cert.CertPEM = res.LeafPEM
+	cs.cert.Chain = res.ChainPEM
+	m.IssuerCA = res.IssuerCA
+	m.IssuerURL = res.IssuerURL
+	m.CertURL = res.CertURL
+	m.NotBefore = res.NotBefore
+	m.NotAfter = res.NotAfter
+	m.ObtainedAt = now
+	m.ConsecutiveFailures = 0
+	m.LastAttempt = now
+	m.LastError = ""
+	m.NextAttempt = time.Time{}
+	m.ARIValid = false
+	m.ARIRetryAfter = 0
+	m.ARIRenewAt = time.Time{}
+	m.ARICheckedAt = time.Time{}
+
+	if err := r.store.SaveCert(cs.cert, r.cfg.FileUID, r.cfg.FileGID, r.cfg.FileMode, r.cfg.KeyMode); err != nil {
 		return fmt.Errorf("persist certificate: %w", err)
 	}
-
-	cs.cert = c
 	cs.leaf = parseLeaf(res.LeafPEM)
-	cs.failures = 0
-	cs.lastError = ""
-	cs.lastAttempt = now
-	cs.nextAttempt = time.Time{}
-	cs.ari = nil
-	cs.ariRenewAt = time.Time{}
-	cs.ariCheckedAt = time.Time{}
-	for _, t := range cs.targets {
-		t.needsDelivery = true
-	}
 
 	r.log.Info("certificate issued",
 		"cert", cs.id,
-		"domains", strings.Join(cs.domains, ","),
+		"domains", strings.Join(m.Domains, ","),
 		"ca", res.IssuerCA,
 		"notAfter", res.NotAfter.Format(time.RFC3339))
 	return nil
@@ -576,18 +553,18 @@ func (r *Reconciler) deliver(ctx context.Context, cs *certState, cyc *cycle) {
 			t.reloadState = "misconfigured"
 			continue
 		}
-		if !t.needsDelivery && !t.pendingReload {
-			continue
-		}
 
+		// Writes are idempotent: WriteCert reports whether content changed, so
+		// there is no separate "needs delivery" flag and a failed write is
+		// naturally retried on the next cycle.
 		changed, err := delivery.WriteCert(t.managerPath, files, opts)
 		if err != nil {
-			t.needsDelivery = true
+			t.delivered = false
 			t.lastErr = err.Error()
 			r.log.Error("delivery failed", "container", t.containerName, "cert", cs.id, "path", t.path, "error", err)
 			continue
 		}
-		t.needsDelivery = false
+		t.delivered = true
 		if changed {
 			t.pendingReload = true
 		}
@@ -651,16 +628,14 @@ func (r *Reconciler) runReload(ctx context.Context, cs *certState, t *targetStat
 }
 
 func (cs *certState) schedState() scheduler.State {
-	st := scheduler.State{
-		ARI:         cs.ari != nil,
-		RenewAt:     cs.ariRenewAt,
-		NextAttempt: cs.nextAttempt,
+	m := &cs.cert.Meta
+	return scheduler.State{
+		NotBefore:   m.NotBefore,
+		NotAfter:    m.NotAfter,
+		ARI:         m.ARIValid,
+		RenewAt:     m.ARIRenewAt,
+		NextAttempt: m.NextAttempt,
 	}
-	if cs.cert != nil {
-		st.NotBefore = cs.cert.Meta.NotBefore
-		st.NotAfter = cs.cert.Meta.NotAfter
-	}
-	return st
 }
 
 func (r *Reconciler) schedCfg() scheduler.Config {
@@ -671,42 +646,12 @@ func (r *Reconciler) schedCfg() scheduler.Config {
 	}
 }
 
+// persist writes the certificate's current state (identity, failure/backoff
+// and ARI) to disk. The PEM files are written only when present, so a
+// never-issued certificate keeps its backoff across restarts.
 func (r *Reconciler) persist(cs *certState) {
-	meta := store.Meta{
-		ID:                  cs.id,
-		Domains:             cs.domains,
-		KeyType:             string(cs.keyType),
-		Profile:             cs.profile,
-		PreferredChain:      cs.preferredChain,
-		ConsecutiveFailures: cs.failures,
-		LastAttempt:         cs.lastAttempt,
-		NextAttempt:         cs.nextAttempt,
-		LastError:           cs.lastError,
-	}
-	if cs.ari != nil {
-		meta.ARIValid = true
-		meta.ARIStart = cs.ari.Start
-		meta.ARIEnd = cs.ari.End
-		meta.ARIRetryAfter = cs.ari.RetryAfter
-		meta.ARIRenewAt = cs.ariRenewAt
-	}
-	meta.ARICheckedAt = cs.ariCheckedAt
-
-	if cs.cert != nil {
-		meta.IssuerCA = cs.cert.Meta.IssuerCA
-		meta.IssuerURL = cs.cert.Meta.IssuerURL
-		meta.CertURL = cs.cert.Meta.CertURL
-		meta.NotBefore = cs.cert.Meta.NotBefore
-		meta.NotAfter = cs.cert.Meta.NotAfter
-		meta.ObtainedAt = cs.cert.Meta.ObtainedAt
-		cs.cert.Meta = meta
-		if err := r.store.SaveCert(cs.cert, r.cfg.FileUID, r.cfg.FileGID, r.cfg.FileMode, r.cfg.KeyMode); err != nil {
-			r.log.Error("persist failure state failed", "cert", cs.id, "error", err)
-		}
-		return
-	}
-	if err := r.store.SaveMeta(cs.id, meta); err != nil {
-		r.log.Error("persist failure state failed", "cert", cs.id, "error", err)
+	if err := r.store.SaveCert(cs.cert, r.cfg.FileUID, r.cfg.FileGID, r.cfg.FileMode, r.cfg.KeyMode); err != nil {
+		r.log.Error("persist certificate state failed", "cert", cs.id, "error", err)
 	}
 }
 
@@ -770,19 +715,18 @@ func (r *Reconciler) publish() {
 	}
 	for _, id := range slices.Sorted(maps.Keys(r.certs)) {
 		cs := r.certs[id]
+		m := &cs.cert.Meta
 		csStatus := CertStatus{
 			ID:          cs.id,
-			Domains:     slices.Clone(cs.domains),
-			KeyType:     string(cs.keyType),
-			Profile:     cs.profile,
+			Domains:     slices.Clone(m.Domains),
+			KeyType:     m.KeyType,
+			Profile:     m.Profile,
 			Candidates:  slices.Clone(cs.candidates),
-			NextAttempt: cs.nextAttempt,
-			LastError:   cs.lastError,
-		}
-		if cs.cert != nil {
-			csStatus.Issuer = cs.cert.Meta.IssuerCA
-			csStatus.IssuerURL = cs.cert.Meta.IssuerURL
-			csStatus.NotAfter = cs.cert.Meta.NotAfter
+			Issuer:      m.IssuerCA,
+			IssuerURL:   m.IssuerURL,
+			NotAfter:    m.NotAfter,
+			NextAttempt: m.NextAttempt,
+			LastError:   m.LastError,
 		}
 		for _, k := range slices.Sorted(maps.Keys(cs.targets)) {
 			t := cs.targets[k]
@@ -790,7 +734,7 @@ func (r *Reconciler) publish() {
 				Container:   t.containerName,
 				Path:        t.path,
 				ManagerPath: t.managerPath,
-				Delivered:   !t.needsDelivery,
+				Delivered:   t.delivered,
 				Reload:      t.reloadState,
 				Error:       t.lastErr,
 			})

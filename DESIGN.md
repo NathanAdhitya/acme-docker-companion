@@ -410,8 +410,8 @@ STATE_DIR/
 - Human-readable directory names for debugging.
 - Atomic writes; temp files cleaned at startup.
 - Non-expired certificates are never deleted; expired unreferenced ones are GC'd.
-- Failure/backoff state can be persisted before any PEM exists (`SaveMeta`), so
-  a never-issued certificate keeps its backoff across restarts.
+- Failure/backoff state is persisted even before any PEM exists, so a
+  never-issued certificate keeps its backoff across restarts.
 
 ## 13. Watcher and lifecycle
 

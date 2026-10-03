@@ -20,7 +20,7 @@ func TestContainerDefaultsInherited(t *testing.T) {
 		"acmed.admin.domains": "admin.example.com",
 		"acmed.admin.path":    "/certs/admin.example.com",
 	}
-	reqs, warns := Parse("acmed", lbls)
+	reqs, warns := Parse("acmed", lbls, certcrypto.EC256)
 	if len(warns) != 0 {
 		t.Fatalf("unexpected warnings: %v", warns)
 	}
@@ -53,7 +53,7 @@ func TestPerCertOverridesDefault(t *testing.T) {
 		"acmed.api.ca":            "letsencrypt",
 		"acmed.api.key-type":      "ec384",
 	}
-	reqs, warns := Parse("acmed", lbls)
+	reqs, warns := Parse("acmed", lbls, certcrypto.EC256)
 	if len(warns) != 0 {
 		t.Fatalf("unexpected warnings: %v", warns)
 	}
@@ -82,7 +82,7 @@ func TestDefaultCertificateInheritsDefaults(t *testing.T) {
 		"acmed.api.domains": "api.example.com",
 		"acmed.api.path":    "/certs/api.example.com",
 	}
-	reqs, _ := Parse("acmed", lbls)
+	reqs, _ := Parse("acmed", lbls, certcrypto.EC256)
 	if len(reqs) != 2 {
 		t.Fatalf("want 2 certificates, got %d", len(reqs))
 	}
@@ -95,7 +95,7 @@ func TestDefaultCertificateInheritsDefaults(t *testing.T) {
 
 // TestDefaultsWithoutCertificatesWarn: defaults alone are not a certificate.
 func TestDefaultsWithoutCertificatesWarn(t *testing.T) {
-	reqs, warns := Parse("acmed", map[string]string{"acmed.reload.cmd": "nginx -s reload"})
+	reqs, warns := Parse("acmed", map[string]string{"acmed.reload.cmd": "nginx -s reload"}, certcrypto.EC256)
 	if len(reqs) != 0 {
 		t.Fatalf("want no certificates, got %d", len(reqs))
 	}
@@ -112,7 +112,7 @@ func TestContainerDisableOptsOutEverything(t *testing.T) {
 		"acmed.api.domains": "api.example.com",
 		"acmed.api.path":    "/certs/api.example.com",
 	}
-	reqs, _ := Parse("acmed", lbls)
+	reqs, _ := Parse("acmed", lbls, certcrypto.EC256)
 	if len(reqs) != 0 {
 		t.Fatalf("container opt-out should yield no certificates, got %d", len(reqs))
 	}
@@ -127,11 +127,25 @@ func TestNamedCertDisableOnlyAffectsItself(t *testing.T) {
 		"acmed.web.domains": "web.example.com",
 		"acmed.web.path":    "/certs/web.example.com",
 	}
-	reqs, warns := Parse("acmed", lbls)
+	reqs, warns := Parse("acmed", lbls, certcrypto.EC256)
 	if len(warns) != 0 {
 		t.Fatalf("unexpected warnings: %v", warns)
 	}
 	if len(reqs) != 1 || reqs[0].CertName != "web" {
 		t.Fatalf("expected only the web certificate, got %+v", reqs)
+	}
+}
+
+// TestGlobalKeyTypeDefault: without acmed.key-type the global default applies.
+func TestGlobalKeyTypeDefault(t *testing.T) {
+	reqs, warns := Parse("acmed", map[string]string{
+		"acmed.domains": "a.example.com",
+		"acmed.path":    "/certs/a.example.com",
+	}, certcrypto.RSA4096)
+	if len(warns) != 0 {
+		t.Fatalf("unexpected warnings: %v", warns)
+	}
+	if len(reqs) != 1 || reqs[0].KeyType != certcrypto.RSA4096 {
+		t.Fatalf("key type = %v, want RSA4096", reqs)
 	}
 }

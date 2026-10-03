@@ -73,12 +73,14 @@ type defaults struct {
 	keyType      certcrypto.KeyType
 }
 
-// Parse extracts certificate requests from a container's labels.
+// Parse extracts certificate requests from a container's labels. defaultKeyType
+// is the global ACME_KEY_TYPE, applied to every certificate that does not set
+// its own acmed.key-type.
 //
 // Problems are returned as warnings rather than errors: a malformed label must
 // never take down the manager or affect other containers. Requests that cannot
 // be made valid are omitted.
-func Parse(prefix string, lbls map[string]string) (requests []Request, warnings []string) {
+func Parse(prefix string, lbls map[string]string, defaultKeyType certcrypto.KeyType) (requests []Request, warnings []string) {
 	if prefix == "" {
 		prefix = "acmed"
 	}
@@ -103,16 +105,13 @@ func Parse(prefix string, lbls map[string]string) (requests []Request, warnings 
 			grouped[name] = rc
 			order = append(order, name)
 		}
-		if _, dup := rc.kv[field]; dup {
-			warnings = append(warnings, fmt.Sprintf("label %q set more than once", key))
-		}
 		rc.kv[field] = strings.TrimSpace(value)
 	}
 
 	sort.Strings(order)
 
 	bare := grouped[""]
-	def, defWarnings := parseDefaults(bare)
+	def, defWarnings := parseDefaults(bare, defaultKeyType)
 	warnings = append(warnings, defWarnings...)
 
 	// acmed.enable=false on the bare labels opts the whole container out.
@@ -202,9 +201,10 @@ func splitKey(rest string) (name, field string, ok bool) {
 	return "", "", false
 }
 
-// parseDefaults reads the container-wide defaults from the bare labels.
-func parseDefaults(bare *rawCert) (defaults, []string) {
-	var d defaults
+// parseDefaults reads the container-wide defaults from the bare labels. The
+// global key type is the starting default; a bare acmed.key-type overrides it.
+func parseDefaults(bare *rawCert, defaultKeyType certcrypto.KeyType) (defaults, []string) {
+	d := defaults{keyType: defaultKeyType}
 	var warnings []string
 	if bare == nil {
 		return d, nil

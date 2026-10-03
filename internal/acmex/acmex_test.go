@@ -1,6 +1,7 @@
 package acmex
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	crand "crypto/rand"
@@ -15,6 +16,8 @@ import (
 	"github.com/go-acme/lego/v5/acme"
 	"github.com/go-acme/lego/v5/certcrypto"
 	"github.com/go-acme/lego/v5/certificate"
+
+	"github.com/NathanAdhitya/acme-docker-companion/internal/config"
 )
 
 func TestIsCASide(t *testing.T) {
@@ -123,5 +126,45 @@ func TestToIssuedSplitsBundle(t *testing.T) {
 	}
 	if !issued.NotAfter.Equal(parsed.NotAfter.UTC()) {
 		t.Errorf("NotAfter = %v, want %v", issued.NotAfter, parsed.NotAfter.UTC())
+	}
+}
+
+// TestCooldownLadderDoublesAndCaps covers the DESIGN §8 D2 schedule
+// 15m -> 6h, reset by a success (clearCooldown).
+func TestCooldownLadderDoublesAndCaps(t *testing.T) {
+	m := &Manager{cooldown: map[string]cooldownEntry{}}
+	want := []time.Duration{
+		15 * time.Minute,
+		30 * time.Minute,
+		60 * time.Minute,
+		120 * time.Minute,
+		240 * time.Minute,
+		6 * time.Hour,
+		6 * time.Hour,
+	}
+	for i, w := range want {
+		m.setCooldown("ca", errors.New("boom"))
+		if got := m.cooldown["ca"].next; got != w {
+			t.Fatalf("attempt %d: next = %v, want %v", i+1, got, w)
+		}
+	}
+
+	m.clearCooldown("ca")
+	m.setCooldown("ca", errors.New("boom"))
+	if got := m.cooldown["ca"].next; got != 15*time.Minute {
+		t.Fatalf("a cleared cooldown must restart at 15m, got %v", got)
+	}
+}
+
+// TestIssueAllCoolingDown: when every candidate is cooling down no order is
+// attempted, and the caller is told via ErrCoolingDown.
+func TestIssueAllCoolingDown(t *testing.T) {
+	m := &Manager{
+		cfg:      &config.Config{CAs: map[string]config.CAConfig{"ca": {Name: "ca"}}},
+		cooldown: map[string]cooldownEntry{"ca": {until: time.Now().Add(time.Hour), err: "down"}},
+	}
+	_, err := m.Issue(context.Background(), IssueRequest{Candidates: []string{"ca"}})
+	if !errors.Is(err, ErrCoolingDown) {
+		t.Fatalf("err = %v, want ErrCoolingDown", err)
 	}
 }

@@ -111,6 +111,9 @@ func relWithin(base, p string) string {
 
 // WriteCert writes the certificate files into dir, skipping any file whose
 // content is unchanged. changed is true when at least one file was rewritten.
+//
+// The file names are the certificate format's, fixed by DESIGN Appendix B;
+// they must stay in sync with the constants in internal/store.
 func WriteCert(dir string, files Files, opts Options) (changed bool, err error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return false, fmt.Errorf("create certificate dir %s: %w", dir, err)

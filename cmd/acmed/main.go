@@ -151,18 +151,14 @@ func cmdCheck(args []string) int {
 
 	requests := 0
 	for _, c := range containers {
-		reqs, warns := labels.Parse(cfg.LabelPrefix, c.Labels)
+		reqs, warns := labels.Parse(cfg.LabelPrefix, c.Labels, cfg.KeyType)
 		for _, w := range warns {
 			fmt.Printf("warning: container %s: %s\n", c.Name, w)
 		}
 		for _, req := range reqs {
 			requests++
-			kt := req.KeyType
-			if kt == "" {
-				kt = cfg.KeyType
-			}
 			fmt.Printf("certificate %s in container %s: domains=%s path=%s key-type=%s\n",
-				labels.DisplayName(req.CertName), c.Name, strings.Join(req.Domains, ","), req.Path, kt)
+				labels.DisplayName(req.CertName), c.Name, strings.Join(req.Domains, ","), req.Path, req.KeyType)
 		}
 	}
 	fmt.Printf("\n%d labeled container(s), %d certificate request(s)\n", len(containers), requests)

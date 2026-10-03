@@ -178,6 +178,22 @@ func TestMissingDNSProviderFails(t *testing.T) {
 	}
 }
 
+func TestDuplicateCADedupedWithWarning(t *testing.T) {
+	clearACMEEnv(t)
+	t.Setenv("ACME_DNS_PROVIDER", "exec")
+	t.Setenv("ACME_CA_ORDER", "letsencrypt, letsencrypt")
+	cfg, warnings, err := Load(false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.CAOrder) != 1 {
+		t.Fatalf("CAOrder = %v, want one entry", cfg.CAOrder)
+	}
+	if len(warnings) == 0 {
+		t.Fatal("expected a duplicate-CA warning")
+	}
+}
+
 func TestRedactedHidesSecrets(t *testing.T) {
 	clearACMEEnv(t)
 	t.Setenv("ACME_DNS_PROVIDER", "exec")

@@ -17,7 +17,7 @@ func TestParseDefaultCert(t *testing.T) {
 		"acmed.manager-path": "/certs/example.com",
 		"unrelated":          "ignored",
 	}
-	reqs, warns := Parse("acmed", lbls)
+	reqs, warns := Parse("acmed", lbls, certcrypto.EC256)
 	if len(warns) != 0 {
 		t.Fatalf("unexpected warnings: %v", warns)
 	}
@@ -60,7 +60,7 @@ func TestParseNamedCerts(t *testing.T) {
 		"acmed.mail.path":         "/certs/mail.example.com",
 		"acmed.mail.reload.cmd":   "/reload.sh",
 	}
-	reqs, warns := Parse("acmed", lbls)
+	reqs, warns := Parse("acmed", lbls, certcrypto.EC256)
 	if len(warns) != 0 {
 		t.Fatalf("unexpected warnings: %v", warns)
 	}
@@ -129,7 +129,7 @@ func TestParseValidation(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			reqs, _ := Parse("acmed", tc.lbls)
+			reqs, _ := Parse("acmed", tc.lbls, certcrypto.EC256)
 			if len(reqs) != tc.wantReq {
 				t.Errorf("got %d requests, want %d (%+v)", len(reqs), tc.wantReq, reqs)
 			}

@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"fmt"
 	"io"
 	"log/slog"
 	"math/big"
@@ -126,13 +127,13 @@ func makeIssued(t *testing.T, domains []string, caURL string) *acmex.Issued {
 	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})
 	leaf, _ := x509.ParseCertificate(der)
 	return &acmex.Issued{
-		IssuerCA:  "letsencrypt",
-		IssuerURL: caURL,
-		CertPEM:   certPEM,
-		KeyPEM:    keyPEM,
-		LeafPEM:   certPEM,
-		NotBefore: leaf.NotBefore.UTC(),
-		NotAfter:  leaf.NotAfter.UTC(),
+		IssuerCA:     "letsencrypt",
+		IssuerURL:    caURL,
+		FullchainPEM: certPEM,
+		KeyPEM:       keyPEM,
+		LeafPEM:      certPEM,
+		NotBefore:    leaf.NotBefore.UTC(),
+		NotAfter:     leaf.NotAfter.UTC(),
 	}
 }
 
@@ -247,7 +248,7 @@ func TestCachedCertReusedAcrossCandidateChange(t *testing.T) {
 	old := makeIssued(t, []string{"example.com"}, stagingURL)
 	id := store.CertID([]string{"example.com"}, certcrypto.EC256, "")
 	if err := st.SaveCert(&store.Cert{
-		ID: id, Fullchain: old.CertPEM, Privkey: old.KeyPEM, CertPEM: old.LeafPEM,
+		ID: id, Fullchain: old.FullchainPEM, Privkey: old.KeyPEM, CertPEM: old.LeafPEM,
 		Meta: store.Meta{ID: id, Domains: []string{"example.com"}, KeyType: string(certcrypto.EC256),
 			IssuerCA: "letsencrypt", IssuerURL: stagingURL, NotBefore: old.NotBefore, NotAfter: old.NotAfter},
 	}, -1, -1, 0o644, 0o600); err != nil {
@@ -575,16 +576,61 @@ func TestARIRefreshHonorsRetryAfter(t *testing.T) {
 	cfg := testConfig(t, "https://acme-staging-v02.api.letsencrypt.org/directory")
 	rec := New(cfg, nil, nil, nil, testLogger())
 
-	if got := rec.ariRefreshAfter(&certState{}); got != cfg.CheckInterval {
+	if got := rec.ariRefreshAfter(&certState{cert: &store.Cert{}}); got != cfg.CheckInterval {
 		t.Fatalf("refresh interval = %v, want %v", got, cfg.CheckInterval)
 	}
-	cs := &certState{ari: &acmex.ARIWindow{RetryAfter: 20 * time.Hour}}
+	cs := &certState{cert: &store.Cert{Meta: store.Meta{ARIValid: true, ARIRetryAfter: 20 * time.Hour}}}
 	if got := rec.ariRefreshAfter(cs); got != 20*time.Hour {
 		t.Fatalf("refresh interval = %v, want 20h", got)
 	}
-	cs.ari.RetryAfter = time.Minute
+	cs.cert.Meta.ARIRetryAfter = time.Minute
 	if got := rec.ariRefreshAfter(cs); got != cfg.CheckInterval {
 		t.Fatalf("a short Retry-After must not shorten the cadence: %v", got)
+	}
+}
+
+// TestCoolingDownDoesNotGrowBackoff: a candidate-wide cooldown is not a
+// certificate failure, so it must not grow the retry backoff (DESIGN §8 D2/D4).
+func TestCoolingDownDoesNotGrowBackoff(t *testing.T) {
+	hostSource := t.TempDir()
+	managerRoot := t.TempDir()
+	caURL := "https://acme-staging-v02.api.letsencrypt.org/directory"
+
+	cfg := testConfig(t, caURL)
+	st, err := store.Open(cfg.StateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	container := dockerx.Container{
+		ID: "c1", Name: "web",
+		Labels: map[string]string{"acmed.domains": "example.com", "acmed.path": "/etc/nginx/certs/example.com"},
+		Mounts: []dockerx.Mount{{Destination: "/etc/nginx/certs", Source: hostSource}},
+	}
+	docker := &fakeDocker{
+		containers: []dockerx.Container{container},
+		self:       dockerx.Container{ID: "self", Mounts: []dockerx.Mount{{Destination: managerRoot, Source: hostSource}}},
+		selfOK:     true,
+	}
+	issuer := &fakeIssuer{err: fmt.Errorf("deferred: %w", acmex.ErrCoolingDown)}
+
+	rec := New(cfg, docker, issuer, st, testLogger())
+	rec.Once(context.Background())
+
+	id := store.CertID([]string{"example.com"}, certcrypto.EC256, "")
+	cert, err := st.LoadCert(id)
+	if err != nil || cert == nil {
+		t.Fatalf("load persisted state: %v", err)
+	}
+	if cert.Meta.ConsecutiveFailures != 0 {
+		t.Fatalf("a cooldown must not count as a failure: %+v", cert.Meta)
+	}
+	if !cert.Meta.NextAttempt.IsZero() {
+		t.Fatalf("a cooldown must not set a retry backoff: %v", cert.Meta.NextAttempt)
+	}
+	if cert.Meta.LastError == "" {
+		t.Fatal("the deferral should still be recorded in LastError")
 	}
 }
 

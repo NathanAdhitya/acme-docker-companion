@@ -223,7 +223,9 @@ func (s *Store) LoadCert(id string) (*Cert, error) {
 	return c, nil
 }
 
-// SaveCert writes all PEM files and meta.json atomically.
+// SaveCert writes the PEM files present in c and meta.json atomically. A
+// certificate that has not been issued yet (no PEM material) persists just its
+// meta, so failure/backoff state survives a restart.
 func (s *Store) SaveCert(c *Cert, uid, gid int, certMode, keyMode os.FileMode) error {
 	dir := filepath.Join(s.dir, "certs", c.ID)
 	type entry struct {
@@ -238,6 +240,9 @@ func (s *Store) SaveCert(c *Cert, uid, gid int, certMode, keyMode os.FileMode) e
 		{FilePrivkey, c.Privkey, keyMode},
 	}
 	for _, e := range entries {
+		if len(e.data) == 0 {
+			continue
+		}
 		if _, err := fsutil.WriteFileAtomic(filepath.Join(dir, e.name), e.data, e.mode, uid, gid); err != nil {
 			return fmt.Errorf("write %s for %s: %w", e.name, c.ID, err)
 		}
@@ -250,21 +255,6 @@ func (s *Store) SaveCert(c *Cert, uid, gid int, certMode, keyMode os.FileMode) e
 		return fmt.Errorf("write meta for %s: %w", c.ID, err)
 	}
 	return nil
-}
-
-// SaveMeta writes only meta.json, used to persist failure/backoff state for a
-// certificate whose PEM material has not been produced yet.
-func (s *Store) SaveMeta(id string, meta Meta) error {
-	dir := filepath.Join(s.dir, "certs", id)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
-	}
-	metaBytes, err := json.MarshalIndent(&meta, "", "  ")
-	if err != nil {
-		return err
-	}
-	_, err = fsutil.WriteFileAtomic(filepath.Join(dir, fileMeta), metaBytes, 0o644, -1, -1)
-	return err
 }
 
 // ListCerts loads every cached certificate.

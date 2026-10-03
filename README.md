@@ -23,8 +23,9 @@ Docker labels ─► parse ─► reconcile ─► ACME DNS-01 (lego) ─► wri
 
 1. Any running container with `acmed.*` labels is a certificate target.
 2. acmed derives the certificate identity from the domains, key type and
-   profile, and reuses a cached certificate when one exists (issuing only when
-   missing, invalid for the current CA set, or due for renewal).
+   profile, and reuses a cached certificate whenever one exists — issuing only
+   when it is missing or due for renewal. Candidate or staging changes never
+   force reissuance.
 3. Certificates are delivered through a bind mount shared with the target.
 4. The target is reloaded with the command or signal you configure.
 

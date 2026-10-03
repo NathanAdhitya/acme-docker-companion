@@ -151,7 +151,7 @@ func TestPebbleIssueAndRenew(t *testing.T) {
 	if issued.NotAfter.Before(time.Now()) {
 		t.Error("issued certificate is already expired")
 	}
-	certs, err := certcrypto.ParsePEMBundle(issued.CertPEM)
+	certs, err := certcrypto.ParsePEMBundle(issued.FullchainPEM)
 	if err != nil || len(certs) == 0 {
 		t.Fatalf("parse issued bundle: %v", err)
 	}
@@ -181,7 +181,7 @@ func TestPebbleIssueAndRenew(t *testing.T) {
 			KeyType:   certcrypto.EC256,
 			IssuerCA:  "pebble",
 			IssuerURL: env.caURL,
-			CertPEM:   issued.CertPEM,
+			CertPEM:   issued.FullchainPEM,
 			KeyPEM:    issued.KeyPEM,
 		},
 	})
@@ -276,7 +276,7 @@ func TestPebbleConcurrentIssuance(t *testing.T) {
 		if err != nil {
 			t.Fatalf("concurrent issuance %d: %v", i, err)
 		}
-		if issued[i] == nil || len(issued[i].CertPEM) == 0 {
+		if issued[i] == nil || len(issued[i].FullchainPEM) == 0 {
 			t.Fatalf("concurrent issuance %d returned no certificate", i)
 		}
 	}

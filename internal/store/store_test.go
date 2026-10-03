@@ -94,7 +94,7 @@ func TestCertRoundTrip(t *testing.T) {
 	}
 }
 
-func TestSaveMetaOnly(t *testing.T) {
+func TestSaveCertMetaOnly(t *testing.T) {
 	s, err := Open(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -102,7 +102,7 @@ func TestSaveMetaOnly(t *testing.T) {
 	defer s.Close()
 
 	id := CertID([]string{"a.example.com"}, certcrypto.EC256, "")
-	if err := s.SaveMeta(id, Meta{ID: id, ConsecutiveFailures: 2, LastError: "boom"}); err != nil {
+	if err := s.SaveCert(&Cert{ID: id, Meta: Meta{ID: id, ConsecutiveFailures: 2, LastError: "boom"}}, -1, -1, 0o644, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	got, err := s.LoadCert(id)

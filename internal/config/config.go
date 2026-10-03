@@ -176,13 +176,19 @@ func Load(dryRun bool) (*Config, []string, error) {
 		return nil, warnings, err
 	}
 
-	// CA order
+	// CA order: de-duplicated, preserving the configured order.
 	orderRaw := envDefault("ACME_CA_ORDER", "letsencrypt")
+	seen := map[string]bool{}
 	for _, name := range strings.Split(orderRaw, ",") {
 		name = strings.TrimSpace(strings.ToLower(name))
 		if name == "" {
 			continue
 		}
+		if seen[name] {
+			warnf("duplicate CA %q in ACME_CA_ORDER; ignoring the repeat", name)
+			continue
+		}
+		seen[name] = true
 		cfg.CAOrder = append(cfg.CAOrder, name)
 	}
 	if len(cfg.CAOrder) == 0 {
@@ -195,24 +201,8 @@ func Load(dryRun bool) (*Config, []string, error) {
 		if err != nil {
 			return nil, warnings, err
 		}
-		if _, dup := cfg.CAs[name]; dup {
-			warnf("duplicate CA %q in ACME_CA_ORDER; ignoring the repeat", name)
-			continue
-		}
 		cfg.CAs[name] = ca
 	}
-	if len(cfg.CAs) == 0 {
-		return nil, warnings, fmt.Errorf("no usable CAs remain after applying the staging filter (order: %s)", orderRaw)
-	}
-
-	// The CA order must only contain CAs that survived filtering.
-	var order []string
-	for _, name := range cfg.CAOrder {
-		if _, ok := cfg.CAs[name]; ok {
-			order = append(order, name)
-		}
-	}
-	cfg.CAOrder = order
 
 	if cfg.DNSProvider == "" {
 		return nil, warnings, fmt.Errorf("ACME_DNS_PROVIDER is required (DNS-01 only)")

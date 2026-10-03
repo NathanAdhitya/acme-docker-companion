@@ -59,16 +59,20 @@ type PrevCert struct {
 
 // Issued is the result of a successful issuance or renewal.
 type Issued struct {
-	IssuerCA  string
-	IssuerURL string
-	CertPEM   []byte
-	KeyPEM    []byte
-	LeafPEM   []byte
-	ChainPEM  []byte
-	NotBefore time.Time
-	NotAfter  time.Time
-	CertURL   string
+	IssuerCA     string
+	IssuerURL    string
+	FullchainPEM []byte
+	KeyPEM       []byte
+	LeafPEM      []byte
+	ChainPEM     []byte
+	NotBefore    time.Time
+	NotAfter     time.Time
+	CertURL      string
 }
+
+// ErrCoolingDown reports that every candidate CA is in a cooldown window, so no
+// order was attempted. Callers must not count it as a certificate failure.
+var ErrCoolingDown = errors.New("all candidate CAs are cooling down")
 
 // ARIWindow is an ACME Renewal Information suggested window.
 type ARIWindow struct {
@@ -108,14 +112,15 @@ type Manager struct {
 	provider   challenge.Provider
 	dnsOptions []dns01.ChallengeOption
 
-	mu       sync.Mutex
+	mu       sync.Mutex // guards cooldown
+	clientMu sync.Mutex // guards clients; held across the one-time build
 	clients  map[string]*caClient
-	locks    map[string]*sync.Mutex
 	cooldown map[string]cooldownEntry
 }
 
 type cooldownEntry struct {
 	until time.Time
+	next  time.Duration
 	err   string
 }
 
@@ -169,7 +174,6 @@ func NewManager(cfg *config.Config, st *store.Store, log *slog.Logger) (*Manager
 		httpClient: hc,
 		provider:   provider,
 		clients:    map[string]*caClient{},
-		locks:      map[string]*sync.Mutex{},
 		cooldown:   map[string]cooldownEntry{},
 	}
 	if cfg.DNSDisableAuthoritativeCheck {
@@ -189,12 +193,14 @@ func (m *Manager) Issue(ctx context.Context, req IssueRequest) (*Issued, error) 
 	}
 
 	var failures []string
+	attempted := false
 	for _, name := range candidates {
 		if entry, ok := m.inCooldown(name); ok {
 			failures = append(failures, fmt.Sprintf("%s: cooling down until %s (%s)", name, entry.until.Format(time.RFC3339), entry.err))
 			continue
 		}
 
+		attempted = true
 		cli, err := m.client(ctx, name)
 		if err != nil {
 			// Configuration/account problem: skip without poisoning the CA.
@@ -214,6 +220,11 @@ func (m *Manager) Issue(ctx context.Context, req IssueRequest) (*Issued, error) 
 		return toIssued(name, cli.url, res)
 	}
 
+	if !attempted {
+		// Every candidate was skipped locally. This is not a certificate
+		// failure: the caller retries once a cooldown lapses.
+		return nil, fmt.Errorf("%w: %s", ErrCoolingDown, strings.Join(failures, "; "))
+	}
 	return nil, fmt.Errorf("all candidate CAs failed: %s", strings.Join(failures, "; "))
 }
 
@@ -292,60 +303,40 @@ func toIssued(caName, caURL string, res *certificate.Resource) (*Issued, error) 
 		chain = append(chain, certcrypto.PEMEncode(certcrypto.DERCertificateBytes(c.Raw))...)
 	}
 	return &Issued{
-		IssuerCA:  caName,
-		IssuerURL: caURL,
-		CertPEM:   res.Certificate,
-		KeyPEM:    res.PrivateKey,
-		LeafPEM:   certcrypto.PEMEncode(certcrypto.DERCertificateBytes(leaf.Raw)),
-		ChainPEM:  chain,
-		NotBefore: leaf.NotBefore.UTC(),
-		NotAfter:  leaf.NotAfter.UTC(),
-		CertURL:   res.CertURL,
+		IssuerCA:     caName,
+		IssuerURL:    caURL,
+		FullchainPEM: res.Certificate,
+		KeyPEM:       res.PrivateKey,
+		LeafPEM:      certcrypto.PEMEncode(certcrypto.DERCertificateBytes(leaf.Raw)),
+		ChainPEM:     chain,
+		NotBefore:    leaf.NotBefore.UTC(),
+		NotAfter:     leaf.NotAfter.UTC(),
+		CertURL:      res.CertURL,
 	}, nil
 }
 
 // --- client construction ---
 
 // client returns the cached client for a CA, building (and registering) it on
-// first use. Construction is serialized per CA so concurrent issuances cannot
-// register two accounts or overwrite each other's key; different CAs build in
-// parallel.
+// first use. Building registers an account, a one-time operation, so the lock
+// is held across it: concurrent issuances then share one account and one
+// client. Issuance itself runs outside the lock.
 func (m *Manager) client(ctx context.Context, name string) (*caClient, error) {
 	ca, ok := m.cfg.CAs[name]
 	if !ok {
 		return nil, fmt.Errorf("CA %q is not configured", name)
 	}
 
-	m.mu.Lock()
+	m.clientMu.Lock()
+	defer m.clientMu.Unlock()
 	if c := m.clients[name]; c != nil {
-		m.mu.Unlock()
 		return c, nil
 	}
-	lock := m.locks[name]
-	if lock == nil {
-		lock = &sync.Mutex{}
-		m.locks[name] = lock
-	}
-	m.mu.Unlock()
-
-	lock.Lock()
-	defer lock.Unlock()
-
-	// Another goroutine may have finished while we waited.
-	m.mu.Lock()
-	c := m.clients[name]
-	m.mu.Unlock()
-	if c != nil {
-		return c, nil
-	}
-
 	c, err := m.buildClient(ctx, ca)
 	if err != nil {
 		return nil, err
 	}
-	m.mu.Lock()
 	m.clients[name] = c
-	m.mu.Unlock()
 	return c, nil
 }
 
@@ -469,14 +460,14 @@ func (m *Manager) setCooldown(name string, cause error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	entry := m.cooldown[name]
-	next := 15 * time.Minute
-	if !entry.until.IsZero() {
-		if d := time.Until(entry.until); d > 0 {
-			next = d * 2
-		}
+	if entry.next == 0 {
+		entry.next = 15 * time.Minute
+	} else {
+		entry.next = min(entry.next*2, 6*time.Hour)
 	}
-	next = min(next, 6*time.Hour)
-	m.cooldown[name] = cooldownEntry{until: time.Now().UTC().Add(next), err: cause.Error()}
+	entry.until = time.Now().UTC().Add(entry.next)
+	entry.err = cause.Error()
+	m.cooldown[name] = entry
 }
 
 func (m *Manager) clearCooldown(name string) {
