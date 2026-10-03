@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/NathanAdhitya/acme-docker-companion/internal/dockerx"
+	"github.com/NathanAdhitya/acme-docker-companion/internal/store"
 )
 
 func TestResolveBindMount(t *testing.T) {
@@ -77,15 +78,15 @@ func TestResolveErrors(t *testing.T) {
 
 func TestWriteCertSkipsUnchanged(t *testing.T) {
 	dir := t.TempDir()
-	files := Files{
+	c := &store.Cert{
 		Fullchain: []byte("chain"),
 		Privkey:   []byte("key"),
-		Cert:      []byte("cert"),
+		CertPEM:   []byte("cert"),
 		Chain:     []byte("issuer"),
 	}
 	opts := Options{UID: -1, GID: -1, CertMode: 0o644, KeyMode: 0o600}
 
-	changed, err := WriteCert(dir, files, opts)
+	changed, err := WriteCert(dir, c, opts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +94,7 @@ func TestWriteCertSkipsUnchanged(t *testing.T) {
 		t.Fatal("first write should report changed")
 	}
 
-	changed, err = WriteCert(dir, files, opts)
+	changed, err = WriteCert(dir, c, opts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,8 +111,8 @@ func TestWriteCertSkipsUnchanged(t *testing.T) {
 		t.Errorf("privkey mode = %v", info.Mode().Perm())
 	}
 
-	files.Privkey = []byte("newkey")
-	changed, err = WriteCert(dir, files, opts)
+	c.Privkey = []byte("newkey")
+	changed, err = WriteCert(dir, c, opts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,20 +126,20 @@ func TestWriteCertSkipsUnchanged(t *testing.T) {
 func TestWriteCertRemovesStaleChain(t *testing.T) {
 	dir := t.TempDir()
 	opts := Options{UID: -1, GID: -1, CertMode: 0o644, KeyMode: 0o600}
-	files := Files{
+	c := &store.Cert{
 		Fullchain: []byte("chain"),
 		Privkey:   []byte("key"),
-		Cert:      []byte("cert"),
+		CertPEM:   []byte("cert"),
 		Chain:     []byte("issuer"),
 	}
-	if _, err := WriteCert(dir, files, opts); err != nil {
+	if _, err := WriteCert(dir, c, opts); err != nil {
 		t.Fatal(err)
 	}
 
-	files.Chain = nil
-	files.Fullchain = []byte("chain2")
-	files.Cert = []byte("cert2")
-	changed, err := WriteCert(dir, files, opts)
+	c.Chain = nil
+	c.Fullchain = []byte("chain2")
+	c.CertPEM = []byte("cert2")
+	changed, err := WriteCert(dir, c, opts)
 	if err != nil {
 		t.Fatal(err)
 	}

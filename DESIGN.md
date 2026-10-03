@@ -85,7 +85,6 @@ Packages:
 | `internal/reconciler` | demand set, dedupe, single-flight, delivery orchestration |
 | `internal/scheduler` | pure lifetime/backoff decision logic (clock injected); ARI windows delegated to lego |
 | `internal/delivery` | mount-path resolution, atomic file writes |
-| `internal/reload` | exec command / signal with a timeout |
 | `internal/httpx` | `/healthz` JSON status |
 | `cmd/acmed` | `run` (default), `check`, `healthcheck`, `--once`, `--dry-run` |
 
@@ -109,7 +108,7 @@ Container ──labels──► []CertRequest ──identity──► Certificat
 Certificate identity:
 
 ```
-certID = "<primary-domain>-<sha256(sorted domains | key type | profile)[:12]>"
+certID = "<first-sorted-domain>-<sha256(sorted domains | key type | profile)[:12]>"
 ```
 
 Notes:
@@ -117,7 +116,9 @@ Notes:
 - Identity is **CA-independent**; the issuing CA is recorded in `meta.json` and
   used to route renewal (§8, decision D1).
 - Sorted domains make the identity order-insensitive, so two containers listing
-  the same SANs in a different order share one certificate.
+  the same SANs in a different order share one certificate. The directory prefix
+  is the first domain in *sorted* order (not the CN), so the directory name is
+  order-insensitive too.
 - Key type and profile are part of the identity, which enables the dual
   RSA+ECDSA pattern for the same domains.
 
@@ -400,7 +401,7 @@ STATE_DIR/
   .lock                                  # flock: refuse a second instance
   accounts/<ca-name>/account.key         # 0600
   accounts/<ca-name>/account.json        # {directoryURL, registration}
-  certs/<primary-domain>-<hash12>/
+  certs/<first-sorted-domain>-<hash12>/
       fullchain.pem privkey.pem cert.pem chain.pem
       meta.json                          # domains, key type, profile, issuer name + URL,
                                          # certURL, obtainedAt, notBefore/notAfter,
@@ -591,7 +592,7 @@ acmed.<name>.enable           named certificate opt-out
 ## Appendix B — on-disk certificate directory
 
 ```
-certs/<primary-domain>-<hash12>/
+certs/<first-sorted-domain>-<hash12>/
   fullchain.pem   leaf + intermediates (what most servers load)
   cert.pem        leaf only
   chain.pem       issuer chain

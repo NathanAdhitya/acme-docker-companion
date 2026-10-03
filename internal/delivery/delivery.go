@@ -13,14 +13,6 @@ import (
 	"github.com/NathanAdhitya/acme-docker-companion/internal/store"
 )
 
-// Files are the four PEM files written for every certificate.
-type Files struct {
-	Fullchain []byte
-	Privkey   []byte
-	Cert      []byte
-	Chain     []byte
-}
-
 // Options controls ownership and permissions of written files.
 type Options struct {
 	UID      int
@@ -113,9 +105,9 @@ func relWithin(base, p string) string {
 // WriteCert writes the certificate files into dir, skipping any file whose
 // content is unchanged. changed is true when at least one file was rewritten.
 //
-// The file names come from the store package, so the cached copy and the
-// delivered copy cannot drift (DESIGN Appendix B).
-func WriteCert(dir string, files Files, opts Options) (changed bool, err error) {
+// It takes the cached certificate so the delivered copy uses the same file
+// names and fields as the cache (DESIGN Appendix B).
+func WriteCert(dir string, c *store.Cert, opts Options) (changed bool, err error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return false, fmt.Errorf("create certificate dir %s: %w", dir, err)
 	}
@@ -124,10 +116,10 @@ func WriteCert(dir string, files Files, opts Options) (changed bool, err error) 
 		data []byte
 		mode os.FileMode
 	}{
-		{store.FileFullchain, files.Fullchain, opts.CertMode},
-		{store.FileCert, files.Cert, opts.CertMode},
-		{store.FileChain, files.Chain, opts.CertMode},
-		{store.FilePrivkey, files.Privkey, opts.KeyMode},
+		{store.FileFullchain, c.Fullchain, opts.CertMode},
+		{store.FileCert, c.CertPEM, opts.CertMode},
+		{store.FileChain, c.Chain, opts.CertMode},
+		{store.FilePrivkey, c.Privkey, opts.KeyMode},
 	}
 	for _, e := range entries {
 		p := path.Join(dir, e.name)

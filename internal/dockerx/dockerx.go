@@ -38,7 +38,7 @@ type Client interface {
 	// Events returns a container-event stream: one signal per event, plus a
 	// terminal error. Callers resync on any signal.
 	Events(ctx context.Context, since time.Time) (<-chan struct{}, <-chan error)
-	Exec(ctx context.Context, id string, cmd []string, timeout time.Duration) (int, string, error)
+	Exec(ctx context.Context, id string, cmd []string, timeout time.Duration) (string, error)
 	Kill(ctx context.Context, id string, signal string) error
 	Self(ctx context.Context) (Container, bool)
 	Close() error
@@ -114,7 +114,7 @@ func (d *dockerClient) Events(ctx context.Context, since time.Time) (<-chan stru
 	return out, errs
 }
 
-func (d *dockerClient) Exec(ctx context.Context, id string, cmd []string, timeout time.Duration) (int, string, error) {
+func (d *dockerClient) Exec(ctx context.Context, id string, cmd []string, timeout time.Duration) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -125,12 +125,12 @@ func (d *dockerClient) Exec(ctx context.Context, id string, cmd []string, timeou
 		TTY:          false,
 	})
 	if err != nil {
-		return -1, "", fmt.Errorf("exec create: %w", err)
+		return "", fmt.Errorf("exec create: %w", err)
 	}
 
 	attached, err := d.cli.ExecAttach(ctx, created.ID, client.ExecAttachOptions{TTY: false})
 	if err != nil {
-		return -1, "", fmt.Errorf("exec attach: %w", err)
+		return "", fmt.Errorf("exec attach: %w", err)
 	}
 	defer attached.Close()
 
@@ -143,12 +143,12 @@ func (d *dockerClient) Exec(ctx context.Context, id string, cmd []string, timeou
 		out += stderr.String()
 	}
 	if ierr != nil {
-		return exitCode, out, ierr
+		return out, ierr
 	}
 	if exitCode != 0 {
-		return exitCode, out, fmt.Errorf("command exited with code %d", exitCode)
+		return out, fmt.Errorf("command exited with code %d", exitCode)
 	}
-	return 0, out, nil
+	return out, nil
 }
 
 func (d *dockerClient) waitExec(ctx context.Context, execID string) (int, error) {

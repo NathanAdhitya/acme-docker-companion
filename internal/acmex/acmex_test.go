@@ -1,6 +1,7 @@
 package acmex
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -105,10 +106,23 @@ func TestToIssuedSplitsBundle(t *testing.T) {
 	}
 	leafPEM := certcrypto.PEMEncode(certcrypto.DERCertificateBytes(der))
 
+	issuerTmpl := *tmpl
+	issuerTmpl.SerialNumber = big.NewInt(2)
+	issuerTmpl.Subject = pkix.Name{CommonName: "issuer.example.com"}
+	issuerTmpl.DNSNames = nil
+	issuerDER, err := x509.CreateCertificate(crand.Reader, &issuerTmpl, &issuerTmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issuerPEM := certcrypto.PEMEncode(certcrypto.DERCertificateBytes(issuerDER))
+
+	// lego returns Certificate as the bundle and IssuerCertificate as the chain.
+	bundle := append(append([]byte(nil), leafPEM...), issuerPEM...)
 	res := &certificate.Resource{
-		Certificate: leafPEM,
-		PrivateKey:  []byte("KEY"),
-		CertURL:     "https://ca/cert/1",
+		Certificate:       bundle,
+		IssuerCertificate: issuerPEM,
+		PrivateKey:        []byte("KEY"),
+		CertURL:           "https://ca/cert/1",
 	}
 	issued, err := toIssued("pebble", "https://ca/dir", res)
 	if err != nil {
@@ -116,6 +130,12 @@ func TestToIssuedSplitsBundle(t *testing.T) {
 	}
 	if issued.IssuerCA != "pebble" || issued.IssuerURL != "https://ca/dir" {
 		t.Errorf("issuer = %q %q", issued.IssuerCA, issued.IssuerURL)
+	}
+	if !bytes.Equal(issued.FullchainPEM, bundle) {
+		t.Error("FullchainPEM should be lego's Certificate bundle")
+	}
+	if !bytes.Equal(issued.ChainPEM, issuerPEM) {
+		t.Error("ChainPEM should be lego's IssuerCertificate")
 	}
 	parsed, err := certcrypto.ParsePEMCertificate(issued.LeafPEM)
 	if err != nil {

@@ -69,7 +69,6 @@ bash test/e2e.sh                    # full container stack: Pebble + acmed + ngi
 | `internal/reconciler/` | demand set, dedupe, single-flight, delivery orchestration, reload coalescing |
 | `internal/scheduler/` | pure force/lifetime/backoff decisions; the ARI draw happens once per window in the reconciler |
 | `internal/delivery/` | mount-path resolution + atomic file writes |
-| `internal/reload/` | exec command / signal with timeout + retries |
 | `internal/httpx/` | `/healthz` JSON |
 | `test/` | integration + e2e fixtures (Pebble, challtestsrv, nginx) |
 
@@ -98,6 +97,10 @@ bash test/e2e.sh                    # full container stack: Pebble + acmed + ngi
 - `certcrypto.PEMEncode` accepts `*ecdsa.PrivateKey`, `*rsa.PrivateKey`,
   `*x509.CertificateRequest` and `certcrypto.DERCertificateBytes` — **not**
   `*x509.Certificate`. Wrap cert DER: `PEMEncode(DERCertificateBytes(cert.Raw))`.
+- `certificate.Resource` already carries both PEM parts: `Certificate` is the
+  leaf (plus chain when `Bundle: true`) and `IssuerCertificate` is the chain
+  after the leaf. Read the leaf's validity with `ParsePEMCertificate` (first
+  block); do not re-split the bundle by hand.
 - Resolvers: **no `dns01.AddRecursiveNameservers` in v5.** Use
   `dns01.NewOptions()` + `dns01.NewClient(opts)` + `dns01.SetDefaultClient(c)`;
   `Options{RecursiveNameservers, Timeout, TCPOnly, NetworkStack}`.

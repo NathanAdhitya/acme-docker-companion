@@ -22,7 +22,6 @@ import (
 	"github.com/NathanAdhitya/acme-docker-companion/internal/delivery"
 	"github.com/NathanAdhitya/acme-docker-companion/internal/dockerx"
 	"github.com/NathanAdhitya/acme-docker-companion/internal/labels"
-	"github.com/NathanAdhitya/acme-docker-companion/internal/reload"
 	"github.com/NathanAdhitya/acme-docker-companion/internal/scheduler"
 	"github.com/NathanAdhitya/acme-docker-companion/internal/store"
 )
@@ -31,6 +30,8 @@ const (
 	resyncInterval = 10 * time.Minute
 	dueInterval    = 1 * time.Minute
 	gcInterval     = 6 * time.Hour
+	// reloadTimeout bounds a reload command run inside a target.
+	reloadTimeout = 30 * time.Second
 )
 
 // Reconciler owns the demand set and the issuance pipeline.
@@ -186,10 +187,15 @@ func (r *Reconciler) watchEvents(ctx context.Context, since time.Time) {
 				backoff = time.Second // a live stream resets the reconnect ladder
 				r.triggerOnce()
 			case err, ok := <-errs:
-				if !ok || err != nil {
+				if !ok {
 					disconnected = true
 					break
 				}
+				if err != nil {
+					r.log.Warn("docker event stream disconnected; resyncing", "error", err)
+				}
+				disconnected = true
+				break
 			}
 		}
 		r.watcherUp.Store(false)
@@ -243,6 +249,13 @@ func (r *Reconciler) resync(ctx context.Context) {
 		}
 	}
 
+	// CA candidates are resolved from this cycle's requests and refreshed each
+	// resync, so a container recreated with a different acmed.ca is honoured
+	// without a restart. When containers disagree about one certificate's
+	// override, the lexicographically smallest list wins, making the choice
+	// independent of Docker's container order.
+	chosen := map[string][]string{}
+
 	referenced := map[string]bool{}
 	for _, c := range containers {
 		if ok && c.ID == self.ID {
@@ -255,19 +268,22 @@ func (r *Reconciler) resync(ctx context.Context) {
 		for _, req := range reqs {
 			id := store.CertID(req.Domains, req.KeyType, r.cfg.Profile)
 
+			cands, cw := r.cfg.ResolveCandidates(req.CAs)
+			for _, w := range cw {
+				addWarn(fmt.Sprintf("container %s: %s", c.Name, w))
+			}
+			if len(cands) == 0 {
+				addWarn(fmt.Sprintf("container %s: certificate %q has no usable CA candidates", c.Name, strings.Join(req.Domains, ",")))
+				continue
+			}
+			if prev, seen := chosen[id]; !seen || lessCandidates(cands, prev) {
+				chosen[id] = cands
+			}
+
 			cs := r.certs[id]
 			if cs == nil {
-				cands, cw := r.cfg.ResolveCandidates(req.CAs)
-				for _, w := range cw {
-					addWarn(fmt.Sprintf("container %s: %s", c.Name, w))
-				}
-				if len(cands) == 0 {
-					addWarn(fmt.Sprintf("container %s: certificate %q has no usable CA candidates", c.Name, strings.Join(req.Domains, ",")))
-					continue
-				}
 				cs = &certState{
-					id:         id,
-					candidates: cands,
+					id: id,
 					cert: &store.Cert{ID: id, Meta: store.Meta{
 						ID:             id,
 						Domains:        req.Domains,
@@ -280,6 +296,7 @@ func (r *Reconciler) resync(ctx context.Context) {
 				r.loadCached(cs)
 				r.certs[id] = cs
 			}
+			cs.candidates = chosen[id]
 			referenced[id] = true
 
 			// Surviving targets keep their delivery/reload state; new ones
@@ -329,6 +346,13 @@ func (r *Reconciler) resync(ctx context.Context) {
 	}
 
 	r.gc(r.now(), referenced)
+}
+
+// lessCandidates orders CA candidate lists deterministically. It is used to
+// pick one list when several containers request the same certificate with
+// different acmed.ca overrides.
+func lessCandidates(a, b []string) bool {
+	return strings.Join(a, ",") < strings.Join(b, ",")
 }
 
 // loadCached restores persisted certificate, ARI and failure state on first
@@ -443,9 +467,10 @@ func (r *Reconciler) processCert(ctx context.Context, cs *certState, cyc *cycle)
 // cacheValid reports whether a usable certificate is cached. It is
 // deliberately issuer-agnostic: a certificate issued by a previous candidate
 // keeps serving until it is due, so CA or staging changes never force
-// reissuance (the cache protects ACME rate limits).
+// reissuance (the cache protects ACME rate limits). The private key is part of
+// validity: delivering a keyless certificate would remove the target's key.
 func (cs *certState) cacheValid() bool {
-	return cs.leaf != nil && len(cs.cert.Fullchain) > 0
+	return cs.leaf != nil && len(cs.cert.Fullchain) > 0 && len(cs.cert.Privkey) > 0
 }
 
 // ariRefreshAfter is how long to wait before querying ARI again: our own
@@ -527,12 +552,6 @@ func (r *Reconciler) deliver(ctx context.Context, cs *certState, cyc *cycle) {
 	if r.cfg.DryRun {
 		return
 	}
-	files := delivery.Files{
-		Fullchain: cs.cert.Fullchain,
-		Privkey:   cs.cert.Privkey,
-		Cert:      cs.cert.CertPEM,
-		Chain:     cs.cert.Chain,
-	}
 	opts := delivery.Options{
 		UID:      r.cfg.FileUID,
 		GID:      r.cfg.FileGID,
@@ -549,7 +568,7 @@ func (r *Reconciler) deliver(ctx context.Context, cs *certState, cyc *cycle) {
 		// Writes are idempotent: WriteCert reports whether content changed, so
 		// there is no separate "needs delivery" flag and a failed write is
 		// naturally retried on the next cycle.
-		changed, err := delivery.WriteCert(t.managerPath, files, opts)
+		changed, err := delivery.WriteCert(t.managerPath, cs.cert, opts)
 		if err != nil {
 			t.delivered = false
 			t.lastErr = err.Error()
@@ -598,9 +617,9 @@ func (r *Reconciler) runReload(ctx context.Context, cs *certState, t *targetStat
 	if !done {
 		switch kind {
 		case "cmd":
-			_, outcome = reload.Exec(ctx, r.docker, t.containerID, value, reload.DefaultTimeout)
+			_, outcome = r.docker.Exec(ctx, t.containerID, []string{"/bin/sh", "-c", value}, reloadTimeout)
 		case "signal":
-			outcome = reload.Signal(ctx, r.docker, t.containerID, value)
+			outcome = r.docker.Kill(ctx, t.containerID, value)
 		}
 		cyc.reloads[key] = outcome
 	}

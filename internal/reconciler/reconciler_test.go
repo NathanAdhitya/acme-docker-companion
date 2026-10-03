@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"math/big"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -73,11 +74,11 @@ func (f *fakeDocker) List(context.Context) ([]dockerx.Container, error) {
 func (f *fakeDocker) Events(context.Context, time.Time) (<-chan struct{}, <-chan error) {
 	return nil, nil
 }
-func (f *fakeDocker) Exec(_ context.Context, _ string, cmd []string, _ time.Duration) (int, string, error) {
+func (f *fakeDocker) Exec(_ context.Context, _ string, cmd []string, _ time.Duration) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.execs = append(f.execs, strings.Join(cmd, " "))
-	return 0, "", f.execErr
+	return "", f.execErr
 }
 func (f *fakeDocker) Kill(_ context.Context, _, signal string) error {
 	f.mu.Lock()
@@ -290,6 +291,50 @@ func TestCachedCertReusedAcrossCandidateChange(t *testing.T) {
 	}
 	if loaded.Meta.IssuerURL != stagingURL {
 		t.Fatalf("cache was rewritten without issuance: %q", loaded.Meta.IssuerURL)
+	}
+}
+
+// TestCandidatesRefreshOnLabelChange: CA candidates are recomputed each resync
+// from the current requests, so a recreated container with a different
+// acmed.ca is honoured without restarting the manager.
+func TestCandidatesRefreshOnLabelChange(t *testing.T) {
+	cfg := testConfig(t, testCAURL)
+	cfg.CAOrder = []string{"letsencrypt", "gts"}
+	cfg.CAs["gts"] = config.CAConfig{Name: "gts", URL: "https://acme.gts.example/directory", Environment: config.EnvProduction}
+	st := openTestStore(t, cfg)
+
+	labels := map[string]string{"acmed.domains": "example.com", "acmed.path": "/etc/nginx/certs/example.com"}
+	_, _, docker := testDocker(t, labels)
+	issuer := &fakeIssuer{issued: makeIssued(t, []string{"example.com"}, testCAURL)}
+
+	rec := New(cfg, docker, issuer, st, testLogger())
+	rec.Once(context.Background())
+	if got := rec.Snapshot().Certs[0].Candidates; !slices.Equal(got, []string{"letsencrypt", "gts"}) {
+		t.Fatalf("initial candidates = %v", got)
+	}
+
+	// The container is recreated with a CA override (labels are immutable).
+	docker.containers[0].Labels["acmed.ca"] = "gts"
+
+	rec.Once(context.Background())
+	if got := rec.Snapshot().Certs[0].Candidates; !slices.Equal(got, []string{"gts"}) {
+		t.Fatalf("candidates after label change = %v", got)
+	}
+}
+
+// TestCacheValidRequiresPrivateKey: a cached certificate whose private key is
+// missing is not usable, so delivery cannot remove the target's key.
+func TestCacheValidRequiresPrivateKey(t *testing.T) {
+	cs := &certState{
+		leaf: &x509.Certificate{},
+		cert: &store.Cert{Fullchain: []byte("fullchain")},
+	}
+	if cs.cacheValid() {
+		t.Fatal("a cache without a private key must not be valid")
+	}
+	cs.cert.Privkey = []byte("privkey")
+	if !cs.cacheValid() {
+		t.Fatal("a complete cache should be valid")
 	}
 }
 

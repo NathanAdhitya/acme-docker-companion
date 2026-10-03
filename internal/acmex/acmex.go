@@ -266,17 +266,12 @@ func canRenew(prev *PrevCert, caName, caURL string) bool {
 }
 
 func toIssued(caName, caURL string, res *certificate.Resource) (*Issued, error) {
-	certs, err := certcrypto.ParsePEMBundle(res.Certificate)
+	// lego already hands back both PEM parts: Certificate is the leaf (+ chain
+	// when Bundle is set) and IssuerCertificate is the chain after the leaf.
+	// Parse only the first block to read the leaf's validity.
+	leaf, err := certcrypto.ParsePEMCertificate(res.Certificate)
 	if err != nil {
-		return nil, fmt.Errorf("parse issued bundle: %w", err)
-	}
-	if len(certs) == 0 {
-		return nil, errors.New("issued bundle contained no certificates")
-	}
-	leaf := certs[0]
-	var chain []byte
-	for _, c := range certs[1:] {
-		chain = append(chain, certcrypto.PEMEncode(certcrypto.DERCertificateBytes(c.Raw))...)
+		return nil, fmt.Errorf("parse issued certificate: %w", err)
 	}
 	return &Issued{
 		IssuerCA:     caName,
@@ -284,7 +279,7 @@ func toIssued(caName, caURL string, res *certificate.Resource) (*Issued, error) 
 		FullchainPEM: res.Certificate,
 		KeyPEM:       res.PrivateKey,
 		LeafPEM:      certcrypto.PEMEncode(certcrypto.DERCertificateBytes(leaf.Raw)),
-		ChainPEM:     chain,
+		ChainPEM:     res.IssuerCertificate,
 		NotBefore:    leaf.NotBefore.UTC(),
 		NotAfter:     leaf.NotAfter.UTC(),
 		CertURL:      res.CertURL,

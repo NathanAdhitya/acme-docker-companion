@@ -213,5 +213,4 @@ staging is documented in `DESIGN.md`.
 | `internal/reconciler` | Desired state, issuance pipeline, delivery orchestration. |
 | `internal/scheduler` | Pure force/lifetime/backoff decisions; the ARI draw happens once per window in the reconciler. |
 | `internal/delivery` | Bind-mount path resolution and atomic file writes. |
-| `internal/reload` | Reload command/signal execution. |
 | `internal/httpx` | `/healthz` status endpoint. |

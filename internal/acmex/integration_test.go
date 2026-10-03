@@ -160,6 +160,11 @@ func TestPebbleIssueAndRenew(t *testing.T) {
 	if err != nil || len(certs) == 0 {
 		t.Fatalf("parse issued bundle: %v", err)
 	}
+	if len(issued.ChainPEM) == 0 {
+		t.Error("issued chain is empty; lego's IssuerCertificate should carry it")
+	} else if chain, cerr := certcrypto.ParsePEMBundle(issued.ChainPEM); cerr != nil || len(chain) == 0 {
+		t.Errorf("issued chain did not parse: %v", cerr)
+	}
 	gotNames := map[string]bool{}
 	for _, n := range certs[0].DNSNames {
 		gotNames[n] = true
