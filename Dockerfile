@@ -1,12 +1,18 @@
 # syntax=docker/dockerfile:1
 
-FROM golang:1.26-alpine AS build
+# Build on the native build platform and cross-compile for the target
+# architecture with Go's own toolchain (CGO_ENABLED=0). BuildKit injects
+# BUILDPLATFORM/TARGETOS/TARGETARCH from --platform, so multi-arch builds never
+# run the compiler under QEMU.
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS build
+ARG TARGETOS
+ARG TARGETARCH
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY cmd ./cmd
 COPY internal ./internal
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/acmed ./cmd/acmed \
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w" -o /out/acmed ./cmd/acmed \
  && mkdir -p /out/data
 
 # Test-only image: the product image is distroless and has no shell, but the
