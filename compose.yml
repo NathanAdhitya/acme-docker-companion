@@ -11,9 +11,10 @@
 #
 services:
   acmed:
-    build: .
-    # Use an image instead of building locally once published:
-    # image: ghcr.io/nathanadhitya/acmed:latest
+    # Published image. To build from source instead, comment this out and
+    # uncomment the build line below.
+    image: ghcr.io/nathanadhitya/acme-docker-companion:latest
+    # build: .
     restart: unless-stopped
     env_file:
       - ./secrets/.env

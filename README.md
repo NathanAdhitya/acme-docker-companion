@@ -41,6 +41,11 @@ cp secrets/.env.example secrets/.env    # then edit it
 docker compose up -d
 ```
 
+`compose.yml` pulls the published image
+(`ghcr.io/nathanadhitya/acme-docker-companion:latest`, multi-arch
+amd64/arm64). To build from source instead, swap the `image:` line for
+`build: .`.
+
 Minimal `.env`:
 
 ```env
