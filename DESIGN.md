@@ -117,8 +117,11 @@ Notes:
   used to route renewal (§8, decision D1).
 - Sorted domains make the identity order-insensitive, so two containers listing
   the same SANs in a different order share one certificate. The directory prefix
-  is the first domain in *sorted* order (not the CN), so the directory name is
-  order-insensitive too.
+  is the first domain in *sorted* order (not the primary name), so the directory
+  name is order-insensitive too.
+- The label order is preserved in the request; the first domain is the primary
+  name. acmed does not set lego's `EnableCommonName`, so the issued certificate
+  has no CommonName (SAN-only).
 - Key type and profile are part of the identity, which enables the dual
   RSA+ECDSA pattern for the same domains.
 
@@ -162,7 +165,7 @@ certificate only.
 
 | Label | Required | Meaning |
 |---|---|---|
-| `acmed.domains` | yes (per cert) | Comma-separated SAN list; first = CN. Wildcards `*.example.com` allowed. |
+| `acmed.domains` | yes (per cert) | Comma-separated SAN list; order preserved (first = primary name). Wildcards `*.example.com` allowed. Issued certificates are SAN-only. |
 | `acmed.path` | yes (per cert) | Absolute directory **for this certificate** inside the target. |
 | `acmed.reload.cmd` | one of | Shell command run in the target after files change. |
 | `acmed.reload.signal` | one of | Signal sent to PID 1 (e.g. `SIGHUP`). Mutually exclusive with `cmd` at the same level. |
@@ -307,8 +310,11 @@ provider, unreadable EAB secret). Per-container label problems are warnings.
   - *Validation* (`unauthorized`, CAA): per-certificate only — one broken domain
     never disables a CA for everyone. Failover still happens because CAA can
     block one CA and not another.
-  - *Config/account* (bad EAB, invalid URL): skip the CA with a warning; it does
-    not count as an attempt.
+  - *Config/account* (bad EAB, invalid URL, account or registration problem):
+    skip the CA with a warning. No order is sent and the CA is not cooled down.
+    If the whole walk fails, the certificate still counts one failure for its
+    backoff; only a walk where every candidate was skipped by a cooldown is
+    exempt (`ErrCoolingDown`).
 - Accounts are per CA and bound to the directory URL: key + registration under
   `accounts/<ca-name>/`. A stored registration is only reused for the URL it was
   created against, so staging and production accounts never cross. Account
@@ -323,9 +329,11 @@ provider, unreadable EAB secret). Per-container label problems are warnings.
   plus on startup and on demand.
 - **ARI first:** `GetRenewalInfo` → `ShouldRenewAt(now, willingToSleep)` (the
   RFC 9773 algorithm is lego's, not reimplemented); the drawn instant is
-  selected once per window, persisted in `meta.json`, and honored — a nil draw
-  waits for the next refresh; `RetryAfter` stretches the next ARI refresh
-  interval; renew with `UseARICertID`.
+  selected on each ARI refresh (at most once per check interval, stretched by
+  `RetryAfter`) and persisted in `meta.json`, so the due tick and a restart do
+  not re-draw it; a nil draw waits for the next refresh. While ARI is valid but
+  no instant has been drawn, the lifetime rule is suppressed; renew with
+  `UseARICertID`.
 - **Fallback (no ARI):** renew two thirds through the lifetime; halfway for
   certificates shorter than ten days. Optional `RENEW_BEFORE` override.
 - **Backoff:** persisted per certificate, `1m → 10m → 100m → 24h`, gating every
@@ -373,7 +381,7 @@ Files written per certificate directory (fixed names):
 
 Write discipline: temp file in the same directory → `fsync` → `rename` →
 `fsync` directory; unchanged content is skipped by byte comparison so mtimes do
-not churn; leftover temp files are removed at startup.
+not churn; leftover temp files in the state directory are removed at startup.
 
 ## 11. Reload
 
@@ -386,7 +394,10 @@ not churn; leftover temp files are removed at startup.
 - Reload runs only when file content actually changed.
 - Failed reloads are retried on a later reconcile cycle and reported as
   `reload: failed` / `pending`; healthcheck stays green (liveness only) so
-  orchestrators do not restart the manager over ACME or reload problems.
+  orchestrators do not restart the manager over ACME or reload problems. The
+  pending flag is in memory: after a manager restart, unchanged files are not
+  rewritten, so the reload is not re-run and the target reports `reload: none`
+  until the content changes.
 
 ### Multi-certificate containers
 
@@ -414,7 +425,7 @@ STATE_DIR/
 ```
 
 - Human-readable directory names for debugging.
-- Atomic writes; temp files cleaned at startup.
+- Atomic writes; temp files in the state directory cleaned at startup.
 - Non-expired certificates are never deleted; expired unreferenced ones are GC'd.
 - Failure/backoff state is persisted even before any PEM exists, so a
   never-issued certificate keeps its backoff across restarts.
@@ -533,7 +544,7 @@ Implemented and verified:
   state (D12).
 - CA failover, per-CA accounts and cooldowns (one cached lego client per CA, so
   the directory is fetched once), ARI-first renewal delegated to lego with one
-  draw per window persisted in `meta.json`, backoff-gated issuance on every
+  draw per ARI refresh persisted in `meta.json`, backoff-gated issuance on every
   path, GC of expired unreferenced certificates.
 - Bind-mount delivery with automatic source mapping, atomic writes, reload
   retry, dry-run and staging behavior. The status endpoint serves a snapshot
@@ -576,7 +587,7 @@ bash test/e2e.sh              # container end-to-end
 
 ```
 acmed.enable                  container-wide opt-out
-acmed.domains                 default certificate: SAN list (first = CN)
+acmed.domains                 default certificate: SAN list (first = primary name)
 acmed.path                    default certificate: absolute target directory
 acmed.reload.cmd|signal       container default reload (per-cert overridable)
 acmed.ca                      container default CA order override

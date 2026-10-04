@@ -1,4 +1,6 @@
-# acmed
+# acme-docker-companion
+(or abbreviated as acmed).  
+Note: This repository is currently not production ready. Most of the functionality was vibe-coded into existence.
 
 `acmed` is a single-purpose Docker sidecar that keeps TLS certificates fresh
 for **many** containers. It watches the Docker socket for container labels,
@@ -70,7 +72,7 @@ The certificate appears in the volume at `example.com/` with
 
 | Label | Required | Meaning |
 |---|---|---|
-| `acmed.domains` | yes | Comma-separated SANs; the first is the CommonName. Wildcards allowed. |
+| `acmed.domains` | yes | Comma-separated SANs; order preserved, the first is the primary name. Wildcards allowed. Certificates are SAN-only (no CommonName). |
 | `acmed.path` | yes | Absolute directory **for this certificate** inside the target. |
 | `acmed.reload.cmd` | one of | Shell command run in the target after files change. |
 | `acmed.reload.signal` | one of | Signal sent to PID 1 (e.g. `SIGHUP`). |
@@ -158,8 +160,9 @@ places a fresh order with the current candidates.
 
 Renewal follows the Let's Encrypt integration guide: **ARI** is consulted at
 least twice a day and its suggested window is honored (the renewal instant is
-drawn once per window); without ARI, renewal happens two thirds through the
-lifetime (halfway for certificates shorter than ten days). Failures back off
+drawn once per ARI refresh, not on every due tick); without ARI, renewal
+happens two thirds through the lifetime (halfway for certificates shorter than
+ten days). Failures back off
 `1m → 10m → 100m → 24h`. Issuance concurrency is bounded and identical requests
 are deduplicated.
 
@@ -211,6 +214,6 @@ staging is documented in `DESIGN.md`.
 | `internal/store` | Accounts, certificate cache, atomic writes, single-instance lock. |
 | `internal/acmex` | lego wrapper: per-CA accounts, DNS-01, failover, ARI. |
 | `internal/reconciler` | Desired state, issuance pipeline, delivery orchestration. |
-| `internal/scheduler` | Pure force/lifetime/backoff decisions; the ARI draw happens once per window in the reconciler. |
+| `internal/scheduler` | Pure force/lifetime/backoff decisions; the ARI draw happens once per ARI refresh in the reconciler. |
 | `internal/delivery` | Bind-mount path resolution and atomic file writes. |
 | `internal/httpx` | `/healthz` status endpoint. |

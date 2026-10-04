@@ -1,7 +1,7 @@
 // Package scheduler contains the pure renewal-decision logic: the
 // lifetime-based fallback threshold and the Let's Encrypt failure backoff.
 // The RFC 9773 ARI window algorithm is lego's; the reconciler draws the
-// renewal instant once per window and passes it here as RenewAt.
+// renewal instant once per ARI refresh and passes it here as RenewAt.
 package scheduler
 
 import "time"

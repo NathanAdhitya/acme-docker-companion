@@ -22,7 +22,9 @@ import (
 type Request struct {
 	// CertName is the label name segment ("" for the default certificate).
 	CertName string
-	// Domains is the normalized SAN list; the first entry is the CommonName.
+	// Domains is the normalized SAN list; order is preserved and the first
+	// entry is the primary name. The issued certificate is SAN-only: acmed
+	// does not set lego's EnableCommonName option.
 	Domains []string
 	// Path is the absolute directory inside the target container that will
 	// receive the certificate files.

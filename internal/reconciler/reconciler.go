@@ -414,9 +414,10 @@ func (r *Reconciler) processCert(ctx context.Context, cs *certState, cyc *cycle)
 	m := &cs.cert.Meta
 
 	// Refresh ARI for a usable certificate and draw the renewal instant once
-	// per window (RFC 9773). Re-drawing on every tick would bias renewal to
-	// the start of the window; a nil draw waits for the next refresh. The
-	// drawn window is persisted so a restart does not re-draw it (DESIGN §12).
+	// per ARI refresh (RFC 9773). Re-drawing on every tick would bias renewal
+	// to the start of the window; a nil draw waits for the next refresh. The
+	// drawn instant is persisted so the due tick and a restart do not re-draw
+	// it before the next refresh (DESIGN §12).
 	ariRefreshed := false
 	if usable && m.IssuerCA != "" {
 		if m.ARICheckedAt.IsZero() || now.Sub(m.ARICheckedAt) >= r.ariRefreshAfter(cs) {

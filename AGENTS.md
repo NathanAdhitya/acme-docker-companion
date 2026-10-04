@@ -67,7 +67,7 @@ bash test/e2e.sh                    # full container stack: Pebble + acmed + ngi
 | `internal/store/` | account + cert cache, atomic writes, `meta.json`, flock |
 | `internal/acmex/` | lego wrapper: CA clients, accounts/EAB, obtain/renew, ARI |
 | `internal/reconciler/` | demand set, dedupe, single-flight, delivery orchestration, reload coalescing |
-| `internal/scheduler/` | pure force/lifetime/backoff decisions; the ARI draw happens once per window in the reconciler |
+| `internal/scheduler/` | pure force/lifetime/backoff decisions; the ARI draw happens once per ARI refresh in the reconciler |
 | `internal/delivery/` | mount-path resolution + atomic file writes |
 | `internal/httpx/` | `/healthz` JSON |
 | `test/` | integration + e2e fixtures (Pebble, challtestsrv, nginx) |
@@ -78,13 +78,17 @@ bash test/e2e.sh                    # full container stack: Pebble + acmed + ngi
 - `log/slog` for structured logs; include container name/ID, cert, CA.
 - Pass `context.Context` through Docker/ACME calls; honor cancellation on shutdown.
 - Keep scheduler/reconciler logic pure and clock-injectable so it is unit-testable.
-- The reconciler is single-writer: live state is mutated only on the main loop
-  (`resync`/`process`); `Snapshot` serves an immutable status published at the end of
-  each cycle. Do not reintroduce per-state locks without a second writer.
+- The reconciler is single-writer: the `resync`, `process` and `publish` phases
+  never overlap. Inside `process`, one worker per certificate mutates that
+  certificate's state in parallel; `process` joins every worker before `publish`
+  runs. `Snapshot` serves an immutable status published at the end of each
+  cycle. Do not reintroduce per-state locks without a second writer.
 - All Docker and ACME access behind interfaces; fakes for tests.
 - Atomic file writes: temp in same dir → `fsync` → `rename` → `fsync` dir; skip
   unchanged content by hash.
-- Domain normalization: lowercase, punycode, dedupe, preserve order (first = CN).
+- Domain normalization: lowercase, punycode, dedupe, preserve order (first =
+  primary name). acmed does not set lego's `EnableCommonName`, so issued
+  certificates are SAN-only.
 
 ## Upstream API gotchas (verified 2026-10)
 
@@ -112,7 +116,7 @@ bash test/e2e.sh                    # full container stack: Pebble + acmed + ngi
   issuer uses `RenewOptions.UseARICertID`; a different candidate uses `Obtain`.
 - ARI: `certificate.RenewalInfo.ShouldRenewAt(now, willingToSleep)` implements
   the RFC 9773 window and jitter; use it rather than reimplementing the window
-  math. Draw it once per fetched window and keep the returned instant —
+  math. Draw it once per ARI refresh and persist the returned instant —
   re-drawing on every tick collapses the jitter to the start of the window.
   `api.ErrNoARI` means fall back to the lifetime rule (two thirds; half
   for <10 days). `RetryAfter` is the minimum interval before the next ARI
